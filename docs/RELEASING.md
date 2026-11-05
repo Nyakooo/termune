@@ -22,9 +22,9 @@
 3. 提交并推送分支，创建匹配版本的注释标签：
 
    ```sh
-   git tag -a v0.1.1 -m "Termune v0.1.1"
+   git tag -a v0.1.2 -m "Termune v0.1.2"
    git push origin master
-   git push origin v0.1.1
+   git push origin v0.1.2
    ```
 
 4. 打开 Actions 页面自行查看结果。六个平台及安装脚本测试全部成功后自动创建 Release，无需本地打包或提供 PAT。工作流使用自带 `GITHUB_TOKEN`，只有发布 job 有 `contents: write` 权限。

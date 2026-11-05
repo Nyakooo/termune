@@ -73,13 +73,23 @@ impl AudioSource {
         Ok(Bridge { url, stop, errors })
     }
 }
-fn serve(mut socket: TcpStream, path: &str, source: &AudioSource, stop: &AtomicBool) -> Result<()> {
+fn configure_socket(socket: &TcpStream) -> Result<()> {
+    // Windows can inherit nonblocking mode from the listening socket.
+    // Worker threads use blocking reads/writes with bounded timeouts.
+    socket
+        .set_nonblocking(false)
+        .map_err(|_| "无法配置音频连接读取模式")?;
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|_| "音频请求超时设置失败")?;
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|_| "音频通道设置失败")?;
+    Ok(())
+}
+
+fn serve(mut socket: TcpStream, path: &str, source: &AudioSource, stop: &AtomicBool) -> Result<()> {
+    configure_socket(&socket)?;
     let mut header = Vec::new();
     let mut byte = [0];
     while !header.ends_with(b"\r\n\r\n") {
@@ -181,4 +191,41 @@ fn serve(mut socket: TcpStream, path: &str, source: &AudioSource, stop: &AtomicB
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn accepted_nonblocking_connection_waits_for_delayed_data() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        // Model Windows inheriting nonblocking mode from the listener, even on Linux.
+        socket.set_nonblocking(true).unwrap();
+        let (ready, wait_ready) = mpsc::channel();
+        let (result, wait_result) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            configure_socket(&socket).unwrap();
+            ready.send(()).unwrap();
+            let mut bytes = [0; 4];
+            let read = socket.read_exact(&mut bytes).map(|()| bytes);
+            let _ = result.send(read);
+        });
+        wait_ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        match wait_result.recv_timeout(Duration::from_millis(100)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("Accepted socket must wait for request data, got {other:?}"),
+        }
+        client.write_all(b"ping").unwrap();
+        assert_eq!(
+            wait_result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            *b"ping"
+        );
+        reader.join().unwrap();
+    }
 }

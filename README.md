@@ -29,11 +29,11 @@ irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 Linux / macOS 需要 `curl`、`sha256sum` 或 `shasum`。Windows 需要系统 PowerShell 5.1+。自定义版本和安装目录：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Nyakooo/termune/master/install.sh | TERMUNE_VERSION=v0.1.1 TERMUNE_INSTALL_DIR="$HOME/.local/bin" sh
+curl -fsSL https://raw.githubusercontent.com/Nyakooo/termune/master/install.sh | TERMUNE_VERSION=v0.1.2 TERMUNE_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 ```powershell
-$env:TERMUNE_VERSION = 'v0.1.1'
+$env:TERMUNE_VERSION = 'v0.1.2'
 $env:TERMUNE_INSTALL_DIR = "$env:LOCALAPPDATA\Termune\bin"
 irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 ```
@@ -195,4 +195,4 @@ Python 只供 Actions 打包使用。操作流程见 [发布说明](docs/RELEASI
 
 ## 致谢
 
-界面和文档组织参考 [Tunerift](https://github.com/Nyakooo/tunerift)。感谢 Ratatui、Crossterm、VLC 及相关 Rust 项目。
+感谢 Ratatui、Crossterm、VLC 及相关 Rust 项目。

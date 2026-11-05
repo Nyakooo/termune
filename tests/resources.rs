@@ -197,6 +197,8 @@ fn logged_in(replies: Vec<Reply>) -> (Session, thread::JoinHandle<Vec<String>>) 
                     Err(e) => panic!("{e}"),
                 }
             };
+            // Accepted Windows sockets may inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
