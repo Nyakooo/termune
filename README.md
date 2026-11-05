@@ -1,0 +1,158 @@
+# Termune
+
+[English](README.en.md) | [简体中文](README.md)
+
+<p align="center">
+  <img src="docs/assets/termune-banner.png" alt="Termune — 让音乐，回到终端。为飞牛 NAS 而生的终端音乐客户端。" width="100%">
+</p>
+<p align="center"><sub>宣传概念图，界面细节以实际版本为准。</sub></p>
+
+**Your NAS. Your music. Your terminal.**
+
+用 Rust 构建的飞牛音乐终端客户端。输入 FN ID 和音乐独立账号，就能在终端里浏览、搜索和播放 NAS 中的音乐。
+
+目前为早期版本。支持 Linux、macOS，播放依赖 VLC；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
+
+## 下载
+
+从 [GitHub Releases](https://github.com/Nyakooo/termune/releases/latest) 下载对应系统和架构的 `.tar.gz`，解压后运行其中的 `termune`。资源包包含说明和版本记录，发布页提供 `SHA256SUMS`；同页无扩展名的文件供直接安装和程序自更新使用。
+
+| 系统 | 架构 | 资源包 |
+| --- | --- | --- |
+| Linux | x86_64 | [termune-x86_64-unknown-linux-gnu.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux | ARM64 | [termune-aarch64-unknown-linux-gnu.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-unknown-linux-gnu.tar.gz) |
+| macOS | Intel | [termune-x86_64-apple-darwin.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-apple-darwin.tar.gz) |
+| macOS | Apple Silicon | [termune-aarch64-apple-darwin.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-apple-darwin.tar.gz) |
+
+Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。Windows 暂不支持播放，不发布 Windows 安装包。
+
+首个 Release 需要发布工作流成功完成后才能下载。运行程序不需要 Rust 或 Python。
+
+## 准备
+
+电脑安装 VLC，确认命令 `vlc` 可用：
+
+```sh
+# Debian / Ubuntu
+sudo apt install vlc
+
+# macOS（Homebrew）
+brew install --cask vlc
+# 若命令不存在，将 VLC 加入 PATH：
+export PATH="/Applications/VLC.app/Contents/MacOS:$PATH"
+```
+
+频谱使用可选的 FFmpeg，Linux 可安装 `ffmpeg`，macOS 可运行 `brew install ffmpeg`。缺少 FFmpeg 不影响音乐播放。频谱会额外读取一份音频流，增加 NAS 网络流量；极简模式不进行频谱分析。
+
+NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创建**音乐独立账号**。FN ID 用于发现设备，不代替音乐账号认证。
+
+## 使用
+
+```sh
+./termune
+```
+
+依次输入 **FN ID、音乐用户名、音乐密码**，密码隐藏显示。无需填写完整 NAS 地址。通过官方 FN Connect 地址发现服务查询线路，自动探测局域网、公网、DDNS 和中继；默认验证 HTTPS 证书。
+
+建议终端至少 **36 × 20**，推荐 **100 × 30** 或更大，支持 UTF-8、真彩色和鼠标事件。输入时字母仍是文字，快捷键不会抢占密码或搜索内容。
+
+曲库支持全部歌曲、专辑、歌手、歌单、风格和收藏。Enter 打开分类详情或播放选中歌曲；播放队列保留开始播放时的来源，浏览其他分类不改变当前队列。列表按需分页，不会在启动时下载整个曲库。
+
+## 操作
+
+| 操作 | 鼠标 | 键盘 |
+| --- | --- | --- |
+| 选择条目 | 点击 / 滚轮 | ↑↓、Home / End |
+| 播放 / 打开专辑、歌手等 | 点击选中后 Enter | Enter |
+| 切换六类曲库 | 点击分类 | 1～6 / Alt+1～6、Tab / Shift+Tab |
+| 翻页 | 点击页码箭头 | ←→ / PageUp / PageDown |
+| 搜索 / 刷新 | — | /、R |
+| 暂停 / 继续 / 停止 | 播放器按钮 | 空格、S |
+| 上一首 / 下一首 | 播放器按钮 | [ / ] |
+| 跳转进度 | 点击或拖动进度条 | Alt+←→，每次 5 秒 |
+| 切换播放模式 | 点击播放器模式标签 | O |
+| 收藏 / 取消收藏 | — | F |
+| 查看详情 | — | I |
+| 极简 / 专业 | F2 设置 | M（非文字输入时全局可用） |
+| 浏览歌词 | 歌词区滚轮 | Alt+↑↓，Alt+Home 恢复跟随 |
+| 帮助 / 设置 | 顶部按钮 | F1 / F2 |
+| 返回 / 取消 | 弹窗关闭按钮 | Esc |
+| 退出 | — | Q（曲库）/ Ctrl+C |
+
+设置中 ↑↓ 选择，←→ 修改，Enter 确认。播放模式在播放器内切换，支持顺序、列表循环、单曲循环和随机；单曲循环仅在自然结束时重复，手动切歌仍可跳过。完整键位见 F1。
+
+## 命令行更新
+
+```sh
+termune update
+```
+
+查询本仓库最新正式 Release，根据系统和架构下载程序，校验 `SHA256SUMS` 中的 SHA256、下载长度和二进制格式，再替换**当前可执行文件**。相同或更新版本不会降级，预发布版本不自动安装。更新不启动登录流程，不读取或修改 NAS 密码、Token、个人配置及缓存。
+
+安装目录需要可写，建议将程序放在 `~/.local/bin/termune` 并加入 PATH。更新前退出其他 Termune 实例；成功后重新运行程序。下载、校验或替换失败保留原程序。更新连接 GitHub，使用标准 `HTTPS_PROXY` / `NO_PROXY` 环境变量，不经过 NAS。
+
+旧版本若没有 `update` 命令，先从 Releases 手动安装一次。异常退出留下 `.termune-update.lock` 时，确认没有更新进程后删除安装目录中的该文件即可重试。
+
+## 界面
+
+F2 中分别选择布局、主题、语言和显示模式。M 随时切换极简 / 专业，保留布局偏好。专业模式显示歌词和频谱，极简保留曲库及基本播放控制。当前不展示封面。
+
+带时间戳的 LRC 歌词跟随 VLC 返回的实际位置，暂停停止、拖动后重新定位；纯文本歌词手动浏览。频谱基于实际解码音频，暂停停止分析，切歌和拖动后重建；独立解码与播放近似同步，不保证逐帧对齐。缺失歌词或频谱失败不会中断音乐。
+
+## 自动登录与配置
+
+登录页勾选“下次自动登录”，成功后只将 Token 和身份信息保存到系统凭据存储，**不保存密码**。下次启动重新发现 NAS 并验证 `/user/me`；Token 有效则直接进入曲库，恢复期间不显示密码表单。
+
+不勾选则下次输入密码。F2 断开连接后可在登录页取消勾选，关闭自动登录并删除已保存凭据。断网、超时不会删除 Token；明确失效或身份不匹配才清理并要求重新登录。
+
+Linux 自动登录依赖桌面 Secret Service（GNOME Keyring 或支持 Secret Service 的 KWallet）及用户 D-Bus 会话；macOS 使用 Keychain。凭据存储不可用时，本次手动登录仍可使用，但不会启用自动登录。
+
+普通配置保存 FN ID、音乐用户名、语言、主题、布局、播放模式和自动登录开关：
+
+- Linux：`$XDG_CONFIG_HOME/termune/config.toml`，通常为 `~/.config/termune/config.toml`。
+- macOS：`~/Library/Application Support/termune/config.toml`。
+
+密码和 Token 不写入普通配置。随机 deviceId 单独保存，个人配置请勿提交到 Git。
+
+## 连接与诊断
+
+```sh
+termune --version       # 版本
+termune --diagnose      # 连接、登录、曲库、搜索及媒体抽样检查
+termune --login-only    # 仅验证登录
+termune --help          # 命令行帮助
+```
+
+官方发现服务提供候选地址，Termune 在本机选择线路；不运行网页登录脚本，不实现官方 App 的 WebRTC/P2P 隧道，也暂不支持 FN Connect 安全码。直连证书不匹配时尝试其他线路，不提供关闭证书验证的选项。
+
+仅在可信局域网可显式使用 `termune --allow-lan-http`。HTTP 可能暴露密码摘要和 Token，请优先 HTTPS。
+
+诊断只抽样验证，不代表全曲库可播放。反馈问题时提供版本、操作系统和脱敏输出，不要附带密码、Token、Cookie 或完整网络抓包。[使用及验证细节](docs/USAGE.md) · [接口记录](docs/FEINIU_API.md)
+
+## 从源码构建
+
+安装支持 Rust 2024 的稳定版工具链：
+
+```sh
+git clone https://github.com/Nyakooo/termune.git
+cd termune
+# Debian / Ubuntu 编译依赖
+sudo apt install pkg-config libdbus-1-dev
+cargo build --release --locked
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+程序位于 `target/release/termune`。VLC 为播放运行依赖，FFmpeg 为可选频谱依赖，不随资源包分发。
+
+## 自动构建与发布
+
+[GitHub Actions](https://github.com/Nyakooo/termune/actions) 在分支推送、PR 或手动触发时检查格式、Clippy、测试，并原生构建四个平台，上传资源到 Actions Artifacts。
+
+发布时同步修改 `Cargo.toml`、`Cargo.lock` 和 [RELEASE_NOTES.md](RELEASE_NOTES.md)，再推送匹配版本的 `v*` 标签，例如 `v0.1.0`。四个平台全部通过后，工作流生成 `SHA256SUMS` 并创建 GitHub Release；版本标签不匹配、平台失败或资源不齐全时不发布。预发布标签标为 prerelease，不参与自动更新。
+
+Python 只供 Actions 打包使用。操作流程见 [发布说明](docs/RELEASING.md)。
+
+## 致谢
+
+界面和文档组织参考 [Tunerift](https://github.com/Nyakooo/tunerift)。感谢 Ratatui、Crossterm、VLC 及相关 Rust 项目。

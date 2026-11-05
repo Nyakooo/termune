@@ -1,0 +1,120 @@
+# 使用与验证细节
+
+返回 [项目首页](../README.md)。
+
+基于 Rust 2024 的飞牛音乐终端曲库客户端。提供 TUI 登录、曲库浏览、搜索及音频播放，保留独立的命令行诊断模式。
+
+## 运行
+
+需要支持 Rust 2024 的工具链（本次使用 Rust 1.99.1；依赖版本由 Cargo.lock 固定）：
+
+```sh
+cargo run --release
+```
+
+默认进入 TUI，建议终端至少 **36 × 20**，推荐 100 × 30。登录页支持键盘、鼠标选择和粘贴，密码隐藏。登录成功后读取第一页，翻页时再请求其他页，不把首页当作全量曲库。
+
+| 操作 | 按键 |
+| --- | --- |
+| 全局帮助 / 设置 | F1 / F2（登录页也可用） |
+| 极简 / 专业 | M（非文字输入状态下全局可用） |
+| 全部歌曲 / 专辑 / 歌手 / 歌单 / 风格 / 收藏 | 1～6（也支持 Alt+1～6） |
+| 顺序 / 列表循环 / 单曲循环 / 随机 | O，或点击播放器模式标签 |
+| 收藏 / 取消收藏选中歌曲 | F |
+| 播放进度 | 点击或拖动进度条，释放鼠标提交；Alt+← / → 快退/快进 5 秒 |
+| 登录输入框与复选框切换 | Tab / Shift+Tab |
+| 下次自动登录复选框 | 空格 / 鼠标点击 |
+| 选择条目 | ↑ / ↓、Home / End、鼠标滚轮或点击 |
+| 切换歌曲 / 专辑 / 歌手 / 歌单 | Tab / Shift+Tab、点击分类 |
+| 翻页 | ← / →、PageUp / PageDown、点击页码旁箭头 |
+| 播放歌曲 / 打开专辑、歌手、歌单 | Enter |
+| 查看歌曲信息 | I |
+| 暂停 / 继续，停止 | 空格，S |
+| 播放队列上一首 / 下一首（支持跨页） | [ / ] |
+| 搜索歌曲，刷新 | /，R |
+| 浏览歌词（专业模式） | 自动跟随播放；Alt+↑ / ↓ 或滚轮切到手动，Alt+Home 恢复跟随 |
+| 返回、取消、关闭弹窗 | Esc |
+| 退出 | Q（曲库）、Esc（登录页）、Ctrl+C（全局） |
+
+配色、布局、显示模式、语言和断开连接统一放在 **F2 设置**。设置里 ↑↓ 选项、←→ 修改、Enter 确认；选择布局会启用专业模式，账户“断开连接”必须 Enter 或点击确认，左右箭头不会触发。F1 提供完整快捷键说明。M 为全局模式切换；输入框里的字母和数字仍是文本。
+
+播放需要 Linux 或 macOS 上安装 VLC，且 `vlc` 在 PATH 中。音频通过仅绑定 127.0.0.1 的随机路径音频桥接交给 VLC，NAS Token 不进入 VLC 参数或 URL；桥接在 Termune 内附加认证，并将 VLC 的 Range 请求转发给 NAS，使远端资源可 seek。进度和时长来自 VLC 控制接口，由后台线程查询，UI 不用本地计时器伪造进度。未知时长时显示 `--:--` 并禁用拖动；NAS 或格式不支持 Range/seek 时会报错。断开或退出停止播放器及桥接监听。
+
+四种模式均作用于开始播放时的来源（全部歌曲、搜索、专辑、歌手、歌单、风格或收藏），浏览其他分类不会改变当前播放来源。顺序模式到末尾停止；列表循环回到开头；单曲循环在自然结束时重播同一 GUID，手动切歌仍可跳过；随机选择来源中的其他歌曲。下一首按来源页码惰性获取，支持跨页；曲库发生变化导致队列失配时提示重新选曲。播放模式只在播放控制区展示和切换，不放在设置面板；点击标签或按 O 切换，选择仍保存到配置。
+
+专业模式按 Tunerift 的空间分工提供五种布局，极简保留曲库、播放控制、进度条和模式。**按本次要求暂不展示封面，也不发起 TUI 封面下载**；已有诊断模式仍可验证封面接口。新配置默认专业模式，旧偏好保留，M 随时切换（文字输入时不触发）。
+
+歌词从 `/lyric/list?trackGUID=...` 获取，支持多时间标签 LRC、offset 和纯文本。带时间戳的歌词按照 VLC 返回的真实位置逐句高亮和滚动，暂停时不推进，拖动后按新位置重新定位；VLC 反馈为秒级，不提供逐字卡拉 OK。纯文本歌词没有时间轴，只支持手动浏览。Alt+↑/↓ 或歌词区滚轮切为手动，Alt+Home 恢复自动跟随。歌词在后台加载，缺失或失败时不影响曲库和播放。极简模式不展示或新请求歌词。
+
+专业模式加入真实音频频谱：Airwave 宽柱、Night Receiver 镜像、Operations 紧凑条、Tracker 点阵、Btop 分段柱，颜色随 Mint / Amber / Violet / Ocean / Mono 主题变化。使用可选依赖 **FFmpeg**（`ffmpeg` 需在 PATH 中），后台将音频解码为单声道 PCM，做 32 频带 FFT 分析；没有依赖或解码失败会明确提示，不影响 VLC 播放。暂停停止分析，拖动后按目标位置重建，极简模式停止分析并隐藏频谱。分析使用独立的认证音频桥接，会额外读取一份音频流、增加网络流量；不读取麦克风。频谱与 VLC 独立解码，位置为近似同步，不保证逐帧对齐。解码参数遵循 [FFmpeg 文档](https://www.ffmpeg.org/ffmpeg.html)。
+
+全部歌曲、专辑、歌手、歌单、风格、收藏六类入口支持分页；Enter 进入专辑/歌手/歌单/风格的歌曲列表。F 收藏/取消收藏当前选中歌曲，服务端确认成功后才更新本地标记；收藏列表会刷新。
+
+请求在后台执行，界面显示加载状态；切换页面或取消后，过期响应不会覆盖当前界面。搜索保留原曲库页，Esc 返回；网络失败显示错误并允许 R 重试。切换分类恢复已读页面与选中行，刷新时重新请求。
+
+登录页可勾选 **“下次自动登录”**：勾选并成功登录后，仅将 Token 和身份校验信息保存到操作系统凭据存储，下次启动重新发现 FN ID 地址并验证 `/user/me`，恢复期间只展示会话恢复画面，不显示密码表单；Token 有效时直接进入曲库，不重复提交密码登录；密码永不保存。不勾选则下次仍需输入密码。从 F2 设置断开并返回登录页后可取消勾选，立即关闭自动登录并尝试删除已保存 Token。开启勾选但尚未成功登录，不会启用自动登录。
+
+系统凭据存储不可用或锁定时，显示明确提示，本次登录仍可使用，但不会启用自动登录，更不会将 Token 写入普通文件。Linux 需要可用的桌面 Secret Service（如 GNOME Keyring / 支持 Secret Service 的 KWallet）和用户 D-Bus 会话；macOS 使用 Keychain，Windows 使用 Credential Manager。
+
+Token 明确失效或 NAS / 用户身份不匹配时，清除失效凭据并提示重新输入密码；断网、超时、服务器错误不会删除保存的凭据。自动恢复失败后本次启动不循环重试，可以手动登录，或退出后在网络恢复时重开。
+
+普通配置保存在系统配置目录的 `termune/config.toml`，只包含 FN ID、用户名、语言、主题、模式及 `auto_login` 开关。随机 deviceId 单独保存；普通配置不包含密码或 Token。Linux 常见路径为 `~/.config/termune/`。不支持额外的 FN Connect 安全码。
+
+依次输入 **FN ID**、**音乐独立用户名**、密码（隐藏输入）。无需手填 NAS 地址。FN ID 只用于发现设备，不能代替音乐账号登录。NAS 必须在线、启用 FN Connect、安装并初始化音乐服务，且已创建音乐独立账号。
+
+程序调用官方地址发现服务，按局域网 IPv4/IPv6、公网 IPv6/IPv4、DDNS、中继顺序选择能返回音乐配置的线路。所有候选并发探测，默认只用 HTTPS，完整验证证书；IP 直连因证书不匹配失败时回退中继。它在本机实现线路选择，不运行网页 JavaScript，也不实现官方 App 的 WebRTC/P2P 隧道。
+
+仅在可信局域网，允许 HTTP 候选可运行：
+
+```sh
+cargo run --release -- --allow-lan-http
+```
+
+**HTTP 会暴露密码摘要和 Token；SHA256 不是传输加密。** 公网 IP 候选始终只用 HTTPS。不提供跳过证书验证选项。
+
+## 命令行诊断与反馈
+
+以下流程通过诊断模式运行，与先前验证程序一致：
+
+```sh
+cargo run --release -- --diagnose
+```
+
+也可直接运行 `./target/release/termune --diagnose`。
+
+
+程序会显示各线路的脱敏 PASS/FAIL、选定线路类型、可识别的版本号、初始化接口情况、登录及 `/user/me` 结果。请反馈这些输出及操作系统即可；不要发送密码、Token、Cookie 或浏览器完整网络抓包。某些设备要求 FN Connect 安全码，当前不支持，会显示 API 非 JSON 或 HTTP 错误，不能据此判断音乐密码错误。
+
+登录后自动检查歌曲、专辑、歌手、歌单、风格和收藏，每类最多两页、每页 50 条。输出 NAS 声明的总数、实际读取数量和页数；不会把抽样读取说成全量同步。检测缺失字段、重复 GUID 和分页期间 total 变化。
+
+随后输入歌曲搜索关键词，支持中文；直接 Enter 使用首首歌曲标题，无可用标题则标记 BLOCKED。搜索只验证接口返回，不自动断言结果相关性。搜索失败不影响已有曲库数据。
+
+最后自动使用已读取项目中的首个封面和首首歌曲验证媒体资源：
+
+- 封面：验证 Content-Type 和 PNG/JPEG/GIF/WebP 文件签名，最多读取 4 MiB（多读取 1 字节检测超限），保存到系统缓存目录下 `termune/covers/`，按服务器、用户 GUID、封面 ID 隔离。每次实际请求服务器，以免缓存掩盖接口失败；不渲染终端图片。
+- 音频：请求 `Range: bytes=0-4095`，仅读取前 4 KiB，用于 Content-Type/文件头检查，不下载整首、不解码。206 同时校验 Content-Range 与返回长度；多读取 1 字节检测异常超限。200 可单独判定资源访问成功，但 Range 判为 FAIL。
+- 媒体最多跟随 5 次重定向，支持相对 URL，记录 302 等状态码与是否跨源，不显示最终 URL。仅向最初 NAS 源发送 Cookie；跨源剥离所有飞牛 Cookie，包括 `mode=relay`。拒绝 HTTPS 降级和跨源 HTTP 跳转。
+- 无歌曲、封面或搜索词时显示 BLOCKED；单项失败后继续其他项目，最终汇总。存在 FAIL 时退出码为 1，否则为 0；BLOCKED 不等于全部验收通过。不会自动写入含账号信息的报告。
+
+仅重复验证登录可使用 `./target/release/termune --login-only`；可与 `--allow-lan-http` 组合。
+
+登录成功要求：HTTP 成功、业务码 0、Token 非空、`/user/me` 返回非空 `name` 和 `guid`。未知响应结构明确失败，不冒充通过。诊断认证流程持久化随机 deviceId 到系统配置目录下 `termune/device-id`（Linux 通常为 `~/.config/termune/device-id`），密码和 Token 不写入磁盘。不输出服务端原始消息或响应体。
+
+无凭据的探测允许最多 5 次同源 HTTPS 重定向；跨源或跨端口跳转会结束该候选，继续探测官方返回的其他候选。认证请求不自动跟随跳转，防止转发密码摘要或 Cookie。中继模式在登录前就携带 `mode=relay`，认证后将其与 `music-token` 合并。若中继和直连都返回 `serverGUID`，比较身份后才选用直连。无中继身份基准时明确提示限制。
+
+## English
+
+A terminal music client for Feiniu Music. Run `cargo run --release`. Use M to toggle minimal/full globally outside text entry, F1 for help and F2 for settings. Keys 1–6 (or Alt+1–6) open all tracks, albums, artists, playlists, genres and favorites; Enter plays/opens, F toggles favorites, O cycles Sequence / Loop all / Repeat one / Shuffle, [ / ] changes tracks across pages within the original playback source. All letters and digits remain normal text in input fields.
+
+VLC receives a private loopback URL instead of a pipe or NAS credentials. The bridge forwards authenticated Range requests and strips cookies on cross-origin redirects. Background VLC IPC provides actual duration and position; click/drag the timeline or use Alt+Left/Right to seek. Unsupported/unknown durations disable seeking rather than fake progress. LRC lyrics follow real playback position at second-level precision, including pause and seeking. Plain text remains manual. Wheel/Alt+Up/Down scroll manually; Alt+Home resumes following. Artwork display is disabled as requested. Playback mode and appearance settings persist; passwords never do. Optional auto-login stores only validated session tokens in the OS keystore.
+
+
+Use `--diagnose` for the previously validated CLI checks: two pages per library type, song search, cover caching and a bounded audio Range request. `--login-only` runs just the login probe. HTTPS verification stays enabled; `--allow-lan-http` explicitly permits insecure local HTTP. No WebRTC/P2P tunnels or FN Connect access-code support.
+
+The user has confirmed real NAS login, four library lists, song search, cover retrieval and 206 Range access. The user has also verified TUI browsing, detail flows and audio playback on their NAS.
+
+Termune is an unofficial third-party client for Feiniu Music and is not affiliated with or endorsed by Feiniu.
+
+See [protocol notes](FEINIU_API.md).
+
+Professional layouts include 32-band PCM/FFT spectra with layout-specific shapes and theme colors. Optional FFmpeg must be on PATH; missing/failed analysis never interrupts VLC. Analysis uses a separate authenticated stream (extra network traffic), stops in minimal mode and on pause, and restarts after seeking. It is approximately synchronized with VLC, not sample-accurate. Saved-token restoration now has its own startup screen, bypassing the password form when validation succeeds.

@@ -1,0 +1,6 @@
+/target/
+
+/dist/
+__pycache__/
+# Keep poster drafts locally; publish only the selected banner.
+/docs/assets/termune-hero*

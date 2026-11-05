@@ -1,0 +1,259 @@
+use serde_json::json;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+    time::Duration,
+};
+use termune::{
+    Candidate, business_data, candidates, client, cookie, hash_password, random_id, validate_id,
+};
+
+#[test]
+fn official_discovery_signature_vector() {
+    let (authx, sign) = termune::discovery_headers(
+        "example",
+        "{\"fnId\":\"example\"}",
+        "123456",
+        "1793836800000",
+    );
+    assert_eq!(
+        authx,
+        "nonce=123456&timestamp=1793836800000&sign=0e1a783884fa3e02af2de69c54d84121"
+    );
+    assert_eq!(
+        sign,
+        "c7cb65909d94f8aaa040bf34486a6252d10091c35503387f1119ac70869c6f85"
+    );
+}
+
+#[test]
+fn password_and_device_id() {
+    assert_eq!(
+        hash_password("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    let id = random_id().unwrap();
+    assert_eq!(id.len(), 32);
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    );
+    assert_ne!(id, random_id().unwrap());
+}
+
+#[test]
+fn ids_and_cookie_injection() {
+    assert_eq!(validate_id(" My-Nas ").unwrap(), "my-nas");
+    for invalid in [
+        "",
+        "https://nas.fnos.net",
+        "nas.fnos.net",
+        "-nas",
+        "nas/path",
+        "a\r\nb",
+    ] {
+        assert!(validate_id(invalid).is_err());
+    }
+    assert_eq!(
+        cookie(true, Some("test-token")).unwrap(),
+        "mode=relay; music-token=test-token"
+    );
+    for bad in ["", "x; evil=yes", "x\r\nheader: yes", "x\"y"] {
+        assert!(cookie(false, Some(bad)).is_err());
+    }
+}
+
+#[test]
+fn discovery_candidates_prioritize_and_validate() {
+    let data = json!({"ipv4":["192.168.1.2", "bad/path"], "publicIpv6":["2001:db8::1"],
+        "fn":["nas.fnos.net:443", "evil@host", "host/path"], "port":{"httpsPort":1234,"httpPort":4321}});
+    let secure = candidates(&data, false);
+    assert_eq!(secure.len(), 3);
+    assert_eq!(secure[0].base.as_str(), "https://192.168.1.2:1234/");
+    assert_eq!(secure[1].base.as_str(), "https://[2001:db8::1]:1234/");
+    assert!(secure[2].relay);
+    let insecure = candidates(&data, true);
+    assert_eq!(insecure.len(), 4);
+    assert_eq!(insecure[1].base.scheme(), "http");
+    assert!(
+        insecure
+            .iter()
+            .filter(|c| c.label == "公网 IPv6")
+            .all(|c| c.base.scheme() == "https")
+    );
+}
+
+#[test]
+fn business_failure_is_not_empty_success_or_secret_echo() {
+    assert!(business_data(json!({"code":0})).is_err());
+    assert!(business_data(json!({"data":{}})).is_err());
+    let error = business_data(json!({"code":120001,"msg":"SECRET"}))
+        .err()
+        .unwrap();
+    assert!(error.contains("120001"));
+    assert!(!error.contains("SECRET"));
+    assert!(business_data(json!({"code":401,"msg":"SECRET"})).is_err());
+}
+
+fn server(responses: Vec<(&'static str, String)>) -> (Candidate, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (headers, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0; 1024];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&bytes);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length: usize = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|s| s.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            requests.push(String::from_utf8(bytes).unwrap());
+            write!(stream, "HTTP/1.1 {headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        requests
+    });
+    (
+        Candidate {
+            base,
+            relay: true,
+            label: "Mock",
+        },
+        handle,
+    )
+}
+
+#[test]
+fn mock_login_hashes_password_and_authenticates_me() {
+    let (candidate, handle) = server(vec![
+        (
+            "200 OK",
+            json!({"code":0,"data":{"userToken":"mock-token"}}).to_string(),
+        ),
+        (
+            "200 OK",
+            json!({"code":0,"data":{"name":"tester","guid":"mock-guid"}}).to_string(),
+        ),
+    ]);
+    candidate
+        .login(
+            &client(3).unwrap(),
+            "tester",
+            "plain-secret",
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+    let requests = handle.join().unwrap();
+    assert!(requests[0].starts_with("POST /music/api/v1/user/password-login "));
+    assert!(
+        requests[0]
+            .to_lowercase()
+            .contains("cookie: mode=relay\r\n")
+    );
+    assert!(!requests[0].contains("plain-secret"));
+    assert!(requests[0].contains(&hash_password("plain-secret")));
+    assert!(requests[1].starts_with("GET /music/api/v1/user/me "));
+    assert!(
+        requests[1]
+            .to_lowercase()
+            .contains("cookie: mode=relay; music-token=mock-token\r\n")
+    );
+}
+
+#[test]
+fn mock_wrong_password_and_invalid_me_fail() {
+    for (responses, expected) in [
+        (
+            vec![("200 OK", json!({"code":120001,"msg":"secret"}).to_string())],
+            "120001",
+        ),
+        (
+            vec![
+                (
+                    "200 OK",
+                    json!({"code":0,"data":{"userToken":"mock-token"}}).to_string(),
+                ),
+                ("401 Unauthorized", "secret".into()),
+            ],
+            "401",
+        ),
+        (
+            vec![
+                (
+                    "200 OK",
+                    json!({"code":0,"data":{"userToken":"mock-token"}}).to_string(),
+                ),
+                ("200 OK", json!({"code":0,"data":{}}).to_string()),
+            ],
+            "user/me",
+        ),
+    ] {
+        let (candidate, handle) = server(responses);
+        let error = candidate
+            .login(&client(3).unwrap(), "tester", "password", "device")
+            .err()
+            .unwrap();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("secret"));
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn mock_auth_redirect_never_reposts_credentials() {
+    let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+    destination.set_nonblocking(true).unwrap();
+    let header: &'static str = Box::leak(
+        format!(
+            "307 Temporary Redirect\r\nLocation: http://{}/stolen",
+            destination.local_addr().unwrap()
+        )
+        .into_boxed_str(),
+    );
+    let (candidate, handle) = server(vec![(header, String::new())]);
+    let error = candidate
+        .login(&client(3).unwrap(), "tester", "secret", "device")
+        .err()
+        .unwrap();
+    assert!(error.contains("307"));
+    handle.join().unwrap();
+    assert_eq!(
+        destination.accept().err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn mock_probe_rejects_html_and_keeps_proxy_prefix() {
+    let (mut candidate, handle) = server(vec![("200 OK", "<html>FN Connect</html>".into())]);
+    candidate.base.set_path("/proxy/");
+    assert!(
+        candidate
+            .probe(&client(3).unwrap())
+            .err()
+            .unwrap()
+            .contains("JSON")
+    );
+    assert!(handle.join().unwrap()[0].starts_with("GET /proxy/music/api/v1/sys/config "));
+}
