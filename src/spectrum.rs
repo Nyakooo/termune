@@ -20,7 +20,13 @@ pub struct Spectrum {
 impl Spectrum {
     pub fn start(source: termune::stream::AudioSource, position: f64) -> Option<Self> {
         let bridge = source.bridge().ok()?;
-        let mut child = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut child = command
             .args(["-nostdin", "-loglevel", "error", "-re", "-ss"])
             .arg(format!("{position:.3}"))
             .args([

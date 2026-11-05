@@ -1,5 +1,0 @@
-Edited using the built-in image_gen tool.
-Reference: docs/assets/termune-hero.png
-
-Precise edit of the supplied original Termune promotional poster. Preserve its ORIGINAL COLORS EXACTLY: dark forest charcoal background, mint-green wordmark and accents, turquoise/mint spectrum, green selected row, muted green background waveform and faint grid. Preserve ALL composition, typography, Chinese headline, subtitle, terminal window, music player content, waveform, light, texture, layout, size and framing. Do not redesign or recolor anything.
-The ONLY change: completely remove the bottom feature strip: the words "FN Connect", "实时频谱", "同步歌词", "五种布局", "Built with Rust", and all geometric icons, separators and horizontal dash associated with those bottom labels. Seamlessly inpaint this bottom strip using the existing dark forest charcoal subtly textured background. Leave this area empty, with no replacement text or icons. Keep the complete terminal window intact above this area. All other pixels should be as close to the reference image as possible. No new objects, no changes to upper text, no monochrome conversion.

@@ -33,6 +33,8 @@ pub fn platform(os: &str, arch: &str) -> Result<&'static str> {
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc"),
         _ => Err("当前系统或架构没有可用的自动更新资源，请查看 GitHub Releases".into()),
     }
 }
@@ -113,7 +115,24 @@ fn valid_binary(header: &[u8], target: &str) -> bool {
     if header.len() < 20 {
         return false;
     }
-    if target.ends_with("linux-gnu") {
+    if target.ends_with("windows-msvc") {
+        if header.len() < 64 || &header[..2] != b"MZ" {
+            return false;
+        }
+        let offset = u32::from_le_bytes(header[60..64].try_into().unwrap()) as usize;
+        let Some(pe) = offset
+            .checked_add(6)
+            .and_then(|end| header.get(offset..end))
+        else {
+            return false;
+        };
+        let machine = if target.starts_with("x86_64") {
+            0x8664u16
+        } else {
+            0xaa64u16
+        };
+        &pe[..4] == b"PE\0\0" && u16::from_le_bytes([pe[4], pe[5]]) == machine
+    } else if target.ends_with("linux-gnu") {
         let machine = if target.starts_with("x86_64") {
             62u16
         } else {
@@ -175,8 +194,8 @@ fn install(
         if count > size {
             return Err("下载长度超过 Release 声明，原程序保留".into());
         }
-        if header.len() < 20 {
-            header.extend_from_slice(&buffer[..n.min(20 - header.len())]);
+        if header.len() < 4096 {
+            header.extend_from_slice(&buffer[..n.min(4096 - header.len())]);
         }
         digest.update(&buffer[..n]);
         file.write_all(&buffer[..n])
@@ -192,15 +211,26 @@ fn install(
         .map_err(|_| "设置程序权限失败")?;
     file.sync_all().map_err(|_| "更新文件同步失败")?;
     drop(file);
-    fs::rename(&staging, destination).map_err(|_| "替换程序失败，原程序保留")?;
+    replace(&staging, destination)?;
     Ok(())
+}
+
+fn replace(staging: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let current = std::env::current_exe()
+            .and_then(fs::canonicalize)
+            .map_err(|_| "无法确认正在运行的程序路径")?;
+        if fs::canonicalize(destination).map_err(|_| "无法确认更新目标")? == current {
+            return self_replace::self_replace(staging)
+                .map_err(|_| "替换程序失败，请关闭其他 Termune 实例并确认安装目录可写".into());
+        }
+    }
+    fs::rename(staging, destination).map_err(|_| "替换程序失败，原程序保留".into())
 }
 
 pub fn run() -> Result<()> {
     let target = platform(std::env::consts::OS, std::env::consts::ARCH)?;
-    #[cfg(not(unix))]
-    return Err("当前系统暂不支持程序替换".into());
-    #[cfg(unix)]
     {
         let client = Client::builder()
             .https_only(true)
@@ -227,7 +257,12 @@ pub fn run() -> Result<()> {
             );
             return Ok(());
         }
-        let name = format!("termune-{target}");
+        let extension = if target.ends_with("windows-msvc") {
+            ".exe"
+        } else {
+            ""
+        };
+        let name = format!("termune-{target}{extension}");
         let binary = asset(&release, &name)?;
         let sums = asset(&release, "SHA256SUMS")?;
         let manifest = bounded(get(&client, &sums.browser_download_url)?, 64 * 1024)?;
@@ -272,7 +307,10 @@ mod tests {
         assert!(!newer("v0.1.0+new", "0.1.0+old").unwrap());
         assert!(newer("v0.2.0-beta.1", "0.1.0").is_err());
         assert!(newer("latest", "0.1.0").is_err());
-        assert!(platform("windows", "x86_64").is_err());
+        assert_eq!(
+            platform("windows", "x86_64").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
         assert_eq!(
             platform("macos", "aarch64").unwrap(),
             "aarch64-apple-darwin"
@@ -303,6 +341,20 @@ mod tests {
             }],
         };
         assert!(asset(&release, "SHA256SUMS").is_err());
+    }
+    #[test]
+    fn windows_pe_header_checks_architecture_and_bounds() {
+        let mut header = [0u8; 128];
+        header[..2].copy_from_slice(b"MZ");
+        header[60..64].copy_from_slice(&64u32.to_le_bytes());
+        header[64..68].copy_from_slice(b"PE\0\0");
+        header[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
+        assert!(valid_binary(&header, "x86_64-pc-windows-msvc"));
+        assert!(!valid_binary(&header, "aarch64-pc-windows-msvc"));
+        header[68..70].copy_from_slice(&0xaa64u16.to_le_bytes());
+        assert!(valid_binary(&header, "aarch64-pc-windows-msvc"));
+        header[60..64].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!valid_binary(&header, "aarch64-pc-windows-msvc"));
     }
     #[test]
     fn failed_updates_preserve_executable_and_remove_staging_files() {

@@ -9,6 +9,33 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
+  installers:
+    name: Test installers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Unix installer fixture tests
+        if: runner.os != 'Windows'
+        run: |
+          sh -n install.sh
+          python tests/install_unix.py
+      - name: Windows PowerShell 5.1 installer fixture tests
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/install_windows.ps1
+      - name: PowerShell 7 installer fixture tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/install_windows.ps1
   build:
     name: Test and package (${{ matrix.target }})
     strategy:
@@ -23,6 +50,12 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: .exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            extension: .exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -49,8 +82,8 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Check command-line entry points
         run: |
-          target/${{ matrix.target }}/release/termune --version
-          target/${{ matrix.target }}/release/termune --help
+          target/${{ matrix.target }}/release/termune${{ matrix.extension }} --version
+          target/${{ matrix.target }}/release/termune${{ matrix.extension }} --help
       - name: Package executable and documentation
         run: python scripts/package_release.py --target ${{ matrix.target }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -62,7 +95,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
-    needs: build
+    needs: [build, installers]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

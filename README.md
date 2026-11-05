@@ -1,21 +1,46 @@
 # Termune
 
-[English](README.en.md) | [简体中文](README.md)
-
-<p align="center">
-  <img src="docs/assets/termune-banner.png" alt="Termune — 让音乐，回到终端。为飞牛 NAS 而生的终端音乐客户端。" width="100%">
-</p>
-<p align="center"><sub>宣传概念图，界面细节以实际版本为准。</sub></p>
-
-**Your NAS. Your music. Your terminal.**
-
 用 Rust 构建的飞牛音乐终端客户端。输入 FN ID 和音乐独立账号，就能在终端里浏览、搜索和播放 NAS 中的音乐。
 
-目前为早期版本。支持 Linux、macOS，播放依赖 VLC；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
+目前为早期版本。支持 Windows、Linux、macOS，播放依赖 VLC；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/Nyakooo/termune/releases/latest) 下载对应系统和架构的 `.tar.gz`，解压后运行其中的 `termune`。资源包包含说明和版本记录，发布页提供 `SHA256SUMS`；同页无扩展名的文件供直接安装和程序自更新使用。
+从 [GitHub Releases](https://github.com/Nyakooo/termune/releases/latest) 下载对应系统和架构的资源包，Windows 使用 `.zip`，Linux / macOS 使用 `.tar.gz`，解压后运行其中的 `termune.exe` / `termune`。资源包包含说明和版本记录，发布页提供 `SHA256SUMS`；同页独立二进制文件供直接安装和程序自更新使用。
+
+### 一条命令安装 / 更新
+
+Linux / macOS（curl）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Nyakooo/termune/master/install.sh | sh
+```
+
+Windows（PowerShell 5.1 或 PowerShell 7）：
+
+```powershell
+irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
+```
+
+自动识别系统与 x86_64 / ARM64，下载最新正式 Release，校验 SHA256 后安装。不需要 Rust、Python 或管理员权限；再次执行同一命令即可更新。脚本只安装 Termune，VLC 和可选 FFmpeg 请按下文准备。
+
+默认目录：Linux / macOS 为 `~/.local/bin/termune`，Windows 为 `%LOCALAPPDATA%\Termune\bin\termune.exe`。脚本会配置用户 PATH；安装后重新打开终端运行 `termune`，也可立即使用脚本输出的完整路径。配置和登录凭据保留。
+
+Linux / macOS 需要 `curl`、`sha256sum` 或 `shasum`。Windows 需要系统 PowerShell 5.1+。自定义版本和安装目录：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Nyakooo/termune/master/install.sh | TERMUNE_VERSION=v0.1.1 TERMUNE_INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+```powershell
+$env:TERMUNE_VERSION = 'v0.1.1'
+$env:TERMUNE_INSTALL_DIR = "$env:LOCALAPPDATA\Termune\bin"
+irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
+```
+
+设置 `TERMUNE_NO_MODIFY_PATH=1` 可禁止修改 PATH；Unix 自定义安装目录需要自行加入 PATH。脚本只下载已发布资源，不读取 Actions 中间产物，也不在本机编译。
+
+### 手动下载
 
 | 系统 | 架构 | 资源包 |
 | --- | --- | --- |
@@ -23,14 +48,16 @@
 | Linux | ARM64 | [termune-aarch64-unknown-linux-gnu.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-unknown-linux-gnu.tar.gz) |
 | macOS | Intel | [termune-x86_64-apple-darwin.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-apple-darwin.tar.gz) |
 | macOS | Apple Silicon | [termune-aarch64-apple-darwin.tar.gz](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-apple-darwin.tar.gz) |
+| Windows | x86_64 | [termune-x86_64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-pc-windows-msvc.zip) |
+| Windows | ARM64 | [termune-aarch64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-pc-windows-msvc.zip) |
 
-Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。Windows 暂不支持播放，不发布 Windows 安装包。
+Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。Windows 使用 VLC 的本机 TCP 控制通道，默认识别 PATH 及 VideoLAN 常见安装目录；Windows 原生构建、播放和自更新仍需结合 Actions 与实际设备验证。
 
-首个 Release 需要发布工作流成功完成后才能下载。运行程序不需要 Rust 或 Python。
+Windows 资源从 v0.1.1 起提供，需要对应发布工作流成功完成后才能下载。运行程序不需要 Rust 或 Python。
 
 ## 准备
 
-电脑安装 VLC，确认命令 `vlc` 可用：
+电脑安装 VLC。Linux 确认 `vlc` 在 PATH 中；macOS 和 Windows 也会尝试常见安装目录：
 
 ```sh
 # Debian / Ubuntu
@@ -42,6 +69,16 @@ brew install --cask vlc
 export PATH="/Applications/VLC.app/Contents/MacOS:$PATH"
 ```
 
+Windows 可使用 winget：
+
+```powershell
+winget install --id VideoLAN.VLC -e
+# 可选：频谱解码
+winget install --id Gyan.FFmpeg -e
+```
+
+安装后重新打开终端。Windows ARM64 可使用系统兼容运行的 VLC 版本；Termune 的 ARM64 程序不要求 VLC 与自身架构相同。
+
 频谱使用可选的 FFmpeg，Linux 可安装 `ffmpeg`，macOS 可运行 `brew install ffmpeg`。缺少 FFmpeg 不影响音乐播放。频谱会额外读取一份音频流，增加 NAS 网络流量；极简模式不进行频谱分析。
 
 NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创建**音乐独立账号**。FN ID 用于发现设备，不代替音乐账号认证。
@@ -49,8 +86,10 @@ NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创�
 ## 使用
 
 ```sh
-./termune
+termune
 ```
+
+手动解压的版本可在目录内运行 `./termune`，Windows PowerShell 使用 `.\termune.exe`。
 
 依次输入 **FN ID、音乐用户名、音乐密码**，密码隐藏显示。无需填写完整 NAS 地址。通过官方 FN Connect 地址发现服务查询线路，自动探测局域网、公网、DDNS 和中继；默认验证 HTTPS 证书。
 
@@ -87,9 +126,9 @@ NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创�
 termune update
 ```
 
-查询本仓库最新正式 Release，根据系统和架构下载程序，校验 `SHA256SUMS` 中的 SHA256、下载长度和二进制格式，再替换**当前可执行文件**。相同或更新版本不会降级，预发布版本不自动安装。更新不启动登录流程，不读取或修改 NAS 密码、Token、个人配置及缓存。
+查询本仓库最新正式 Release，根据系统和架构下载程序，校验 `SHA256SUMS` 中的 SHA256、下载长度和二进制格式，再替换**当前可执行文件**（Windows 使用兼容运行中文件锁的替换流程）。相同或更新版本不会降级，预发布版本不自动安装。更新不启动登录流程，不读取或修改 NAS 密码、Token、个人配置及缓存。
 
-安装目录需要可写，建议将程序放在 `~/.local/bin/termune` 并加入 PATH。更新前退出其他 Termune 实例；成功后重新运行程序。下载、校验或替换失败保留原程序。更新连接 GitHub，使用标准 `HTTPS_PROXY` / `NO_PROXY` 环境变量，不经过 NAS。
+安装目录需要可写，建议使用安装脚本的默认用户目录并加入 PATH。更新前退出其他 Termune 实例；成功后重新运行程序。下载、校验或替换失败保留原程序。更新连接 GitHub，使用标准 `HTTPS_PROXY` / `NO_PROXY` 环境变量，不经过 NAS。
 
 旧版本若没有 `update` 命令，先从 Releases 手动安装一次。异常退出留下 `.termune-update.lock` 时，确认没有更新进程后删除安装目录中的该文件即可重试。
 
@@ -105,12 +144,13 @@ F2 中分别选择布局、主题、语言和显示模式。M 随时切换极简
 
 不勾选则下次输入密码。F2 断开连接后可在登录页取消勾选，关闭自动登录并删除已保存凭据。断网、超时不会删除 Token；明确失效或身份不匹配才清理并要求重新登录。
 
-Linux 自动登录依赖桌面 Secret Service（GNOME Keyring 或支持 Secret Service 的 KWallet）及用户 D-Bus 会话；macOS 使用 Keychain。凭据存储不可用时，本次手动登录仍可使用，但不会启用自动登录。
+Linux 自动登录依赖桌面 Secret Service（GNOME Keyring 或支持 Secret Service 的 KWallet）及用户 D-Bus 会话；macOS 使用 Keychain，Windows 使用 Credential Manager。凭据存储不可用时，本次手动登录仍可使用，但不会启用自动登录。
 
 普通配置保存 FN ID、音乐用户名、语言、主题、布局、播放模式和自动登录开关：
 
 - Linux：`$XDG_CONFIG_HOME/termune/config.toml`，通常为 `~/.config/termune/config.toml`。
 - macOS：`~/Library/Application Support/termune/config.toml`。
+- Windows：`%APPDATA%\termune\config\config.toml`。
 
 密码和 Token 不写入普通配置。随机 deviceId 单独保存，个人配置请勿提交到 Git。
 
@@ -147,9 +187,9 @@ cargo clippy --locked --all-targets -- -D warnings
 
 ## 自动构建与发布
 
-[GitHub Actions](https://github.com/Nyakooo/termune/actions) 在分支推送、PR 或手动触发时检查格式、Clippy、测试，并原生构建四个平台，上传资源到 Actions Artifacts。
+[GitHub Actions](https://github.com/Nyakooo/termune/actions) 在分支推送、PR 或手动触发时检查格式、Clippy、测试，并原生构建六个平台，上传资源到 Actions Artifacts。
 
-发布时同步修改 `Cargo.toml`、`Cargo.lock` 和 [RELEASE_NOTES.md](RELEASE_NOTES.md)，再推送匹配版本的 `v*` 标签，例如 `v0.1.0`。四个平台全部通过后，工作流生成 `SHA256SUMS` 并创建 GitHub Release；版本标签不匹配、平台失败或资源不齐全时不发布。预发布标签标为 prerelease，不参与自动更新。
+发布时同步修改 `Cargo.toml`、`Cargo.lock` 和 [RELEASE_NOTES.md](RELEASE_NOTES.md)，再推送匹配版本的 `v*` 标签，例如 `v0.1.0`。六个平台及安装脚本测试全部通过后，工作流生成 `SHA256SUMS` 并创建 GitHub Release；版本标签不匹配、平台失败或资源不齐全时不发布。预发布标签标为 prerelease，不参与自动更新。
 
 Python 只供 Actions 打包使用。操作流程见 [发布说明](docs/RELEASING.md)。
 

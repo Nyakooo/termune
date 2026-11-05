@@ -7,11 +7,13 @@ import re
 import shutil
 import tarfile
 import tomllib
+import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGETS = (
     "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin", "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
 )
 
 
@@ -30,30 +32,46 @@ def version(root=ROOT, ref=None):
     return value
 
 
+def asset_names(target):
+    windows = target.endswith("windows-msvc")
+    return (f"termune-{target}" + (".exe" if windows else ""),
+            f"termune-{target}" + (".zip" if windows else ".tar.gz"))
+
+
 def names(value):
-    return {name for target in TARGETS for name in (
-        f"termune-{target}", f"termune-{target}.tar.gz")}
+    return {name for target in TARGETS for name in asset_names(target)}
 
 
 def package(target, root=ROOT):
     if target not in TARGETS:
         raise ValueError("Unsupported release target")
     value = version(root)
-    executable = root / "target" / target / "release" / "termune"
+    executable_name = "termune.exe" if target.endswith("windows-msvc") else "termune"
+    executable = root / "target" / target / "release" / executable_name
     if not executable.is_file():
         raise ValueError(f"Missing executable: {executable}")
     dist = root / "dist"
     dist.mkdir(exist_ok=True)
-    binary = dist / f"termune-{target}"
+    binary_name, archive_name = asset_names(target)
+    binary = dist / binary_name
     shutil.copyfile(executable, binary)
     binary.chmod(0o755)
     prefix = f"termune-v{value}-{target}"
-    with tarfile.open(dist / f"termune-{target}.tar.gz", "w:gz") as archive:
-        archive.add(binary, arcname=f"{prefix}/termune")
-        for name in ("README.md", "README.en.md", "RELEASE_NOTES.md"):
-            archive.add(root / name, arcname=f"{prefix}/{name}")
-        archive.add(root / "docs", arcname=f"{prefix}/docs", filter=lambda item:
-                    None if "termune-hero" in item.name else item)
+    files = [(binary, executable_name)]
+    files += [(root / name, name) for name in ("README.md", "RELEASE_NOTES.md", "install.sh", "install.ps1")]
+    files += [(path, f"docs/{path.name}") for path in sorted((root / "docs").glob("*.md"))]
+    if target.endswith("windows-msvc"):
+        with zipfile.ZipFile(dist / archive_name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for source, name in files:
+                archive.write(source, f"{prefix}/{name}")
+    else:
+        with tarfile.open(dist / archive_name, "w:gz") as archive:
+            for source, name in files:
+                def permissions(item):
+                    if item.name == f"{prefix}/{executable_name}":
+                        item.mode = 0o755
+                    return item
+                archive.add(source, arcname=f"{prefix}/{name}", filter=permissions)
     print(f"Packaged {target} v{value}")
 
 
@@ -72,7 +90,7 @@ def checksums(root=ROOT):
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         lines.append(f"{digest}  {name}\n")
     (dist / "SHA256SUMS").write_text("".join(lines))
-    print("Verified all four platforms; wrote SHA256SUMS")
+    print("Verified all six platforms; wrote SHA256SUMS")
 
 
 if __name__ == "__main__":

@@ -29,64 +29,102 @@ pub struct Player {
 }
 impl Player {
     pub fn start(source: termune::stream::AudioSource, title: String) -> Result<Self> {
-        #[cfg(not(unix))]
-        {
-            let _ = (source, title);
-            return Err("播放暂不支持此操作系统".into());
-        }
+        Self::start_with_transport(source, title, cfg!(windows))
+    }
+    fn start_with_transport(
+        source: termune::stream::AudioSource,
+        title: String,
+        tcp: bool,
+    ) -> Result<Self> {
+        let bridge = source.clone().bridge()?;
+        let directory = std::env::temp_dir().join(format!("termune-{}", termune::random_id()?));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(false);
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            let bridge = source.clone().bridge()?;
-            let directory = std::env::temp_dir().join(format!("termune-{}", termune::random_id()?));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&directory)
-                .map_err(|_| "无法创建播放器控制目录")?;
-            let socket = directory.join("control");
-            let mut command = Command::new("vlc");
-            command
-                .args(["--intf", "oldrc", "--rc-fake-tty", "--rc-unix"])
-                .arg(&socket)
-                .args([
-                    "--no-video",
-                    "--no-one-instance",
-                    "--play-and-exit",
-                    "--quiet",
-                ])
-                .arg(&bridge.url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            #[cfg(test)]
-            command.arg("--aout=dummy");
-            let child = command.spawn();
-            let child = match child {
-                Ok(c) => c,
-                Err(_) => {
-                    let _ = std::fs::remove_dir_all(&directory);
-                    return Err("无法启动 VLC，请检查 vlc 是否在 PATH 中".into());
-                }
-            };
-            let (tx, rx) = mpsc::channel();
-            let (updates, samples) = mpsc::channel();
-            std::thread::spawn(move || control_loop(socket, rx, updates));
-            Ok(Self {
-                child,
-                directory,
-                _bridge: bridge,
-                controls: tx,
-                updates: samples,
-                title,
-                paused: false,
-                timeline: Timeline::default(),
-                spectrum: None,
-                spectrum_source: source,
-                spectrum_unavailable: false,
-                visualize: false,
-                spectrum_resume_at: None,
-            })
+            builder.mode(0o700);
         }
+        builder
+            .create(&directory)
+            .map_err(|_| "无法创建播放器控制目录")?;
+        let result = Self::launch(source, title, bridge, directory.clone(), tcp);
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        result
+    }
+    fn launch(
+        source: termune::stream::AudioSource,
+        title: String,
+        bridge: termune::stream::Bridge,
+        directory: std::path::PathBuf,
+        tcp: bool,
+    ) -> Result<Self> {
+        let mut command = Command::new(vlc_path());
+        command.args(["--intf", if cfg!(windows) { "rc" } else { "oldrc" }]);
+        #[cfg(unix)]
+        command.arg("--rc-fake-tty");
+        let endpoint = if tcp {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|_| "无法选择本机播放器控制端口")?;
+            let address = listener
+                .local_addr()
+                .map_err(|_| "读取播放器控制端口失败")?;
+            command.arg("--rc-host").arg(address.to_string());
+            // VLC must bind this loopback port itself; no NAS credentials cross RC.
+            drop(listener);
+            Endpoint::Tcp(address)
+        } else {
+            #[cfg(unix)]
+            {
+                let socket = directory.join("control");
+                command.arg("--rc-unix").arg(&socket);
+                Endpoint::Unix(socket)
+            }
+            #[cfg(not(unix))]
+            return Err("当前平台需要 TCP 播放器控制通道".into());
+        };
+        command
+            .args([
+                "--no-video",
+                "--no-one-instance",
+                "--play-and-exit",
+                "--quiet",
+            ])
+            .arg(&bridge.url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.arg("--rc-quiet").creation_flags(0x08000000);
+        }
+        #[cfg(test)]
+        command.arg("--aout=dummy");
+        let child = command
+            .spawn()
+            .map_err(|_| "无法启动 VLC，请安装 VLC 或将 vlc 加入 PATH")?;
+        let (tx, rx) = mpsc::channel();
+        let (updates, samples) = mpsc::channel();
+        let marker = directory.clone();
+        std::thread::spawn(move || control_loop(endpoint, marker, rx, updates));
+        Ok(Self {
+            child,
+            directory,
+            _bridge: bridge,
+            controls: tx,
+            updates: samples,
+            title,
+            paused: false,
+            timeline: Timeline::default(),
+            spectrum: None,
+            spectrum_source: source,
+            spectrum_unavailable: false,
+            visualize: false,
+            spectrum_resume_at: None,
+        })
     }
     pub fn toggle(&mut self) -> Result<()> {
         self.controls
@@ -162,30 +200,87 @@ impl Drop for Player {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
-#[cfg(unix)]
-fn control_loop(path: std::path::PathBuf, rx: mpsc::Receiver<Control>, tx: mpsc::Sender<Timeline>) {
+fn vlc_path() -> std::path::PathBuf {
+    let name = if cfg!(windows) { "vlc.exe" } else { "vlc" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    #[cfg(windows)]
+    for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(directory) = std::env::var_os(key) {
+            let candidate = std::path::PathBuf::from(directory).join("VideoLAN/VLC/vlc.exe");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let candidate = std::path::PathBuf::from("/Applications/VLC.app/Contents/MacOS/VLC");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    name.into()
+}
+trait ControlIo: std::io::Read + std::io::Write {}
+impl<T: std::io::Read + std::io::Write> ControlIo for T {}
+enum Endpoint {
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+    Tcp(std::net::SocketAddr),
+}
+impl Endpoint {
+    fn connect(&self) -> std::io::Result<Box<dyn ControlIo>> {
+        use std::time::Duration;
+        let timeout = Duration::from_millis(200);
+        match self {
+            #[cfg(unix)]
+            Self::Unix(path) => {
+                let socket = std::os::unix::net::UnixStream::connect(path)?;
+                socket.set_read_timeout(Some(timeout))?;
+                socket.set_write_timeout(Some(timeout))?;
+                Ok(Box::new(socket))
+            }
+            Self::Tcp(address) => {
+                let socket = std::net::TcpStream::connect_timeout(address, timeout)?;
+                socket.set_read_timeout(Some(timeout))?;
+                socket.set_write_timeout(Some(timeout))?;
+                Ok(Box::new(socket))
+            }
+        }
+    }
+}
+fn control_loop(
+    endpoint: Endpoint,
+    directory: std::path::PathBuf,
+    rx: mpsc::Receiver<Control>,
+    tx: mpsc::Sender<Timeline>,
+) {
     use std::{
         io::{BufRead, BufReader, Write},
-        os::unix::net::UnixStream,
         time::Duration,
     };
     // All IPC runs here; drawing and dragging never wait on the VLC socket.
     loop {
-        if !path.parent().is_some_and(|p| p.exists()) {
+        if !directory.exists() {
             return;
         }
-        let socket = match UnixStream::connect(&path) {
+        let socket = match endpoint.connect() {
             Ok(s) => s,
             Err(_) => {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
         };
-        let _ = socket.set_read_timeout(Some(Duration::from_millis(200)));
-        let _ = socket.set_write_timeout(Some(Duration::from_millis(200)));
         let mut reader = BufReader::new(socket);
         loop {
-            if !path.parent().is_some_and(|p| p.exists()) {
+            if !directory.exists() {
                 return;
             }
             while let Ok(command) = rx.try_recv() {
@@ -237,15 +332,20 @@ fn control_loop(path: std::path::PathBuf, rx: mpsc::Receiver<Control>, tx: mpsc:
         }
     }
 }
-#[cfg(not(unix))]
-fn control_loop(_: std::path::PathBuf, _: mpsc::Receiver<Control>, _: mpsc::Sender<Timeline>) {}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
     #[ignore = "requires local VLC; uses synthetic WAV and fake NAS, never real credentials"]
     fn real_vlc_bridge_reports_position_pause_seek_and_eof() {
+        exercise(false);
+    }
+    #[test]
+    #[ignore = "requires local VLC; exercises the Windows TCP transport on a fake NAS"]
+    fn real_vlc_tcp_reports_position_pause_seek_and_eof() {
+        exercise(true);
+    }
+    fn exercise(tcp: bool) {
         use std::{
             io::{Read, Write},
             net::TcpListener,
@@ -392,12 +492,13 @@ mod tests {
             "device",
         )
         .unwrap();
-        let mut player = Player::start(
+        let mut player = Player::start_with_transport(
             termune::stream::AudioSource {
                 session,
                 guid: "test-track".into(),
             },
             "synthetic WAV".into(),
+            tcp,
         )
         .unwrap();
         player.visualize(true);

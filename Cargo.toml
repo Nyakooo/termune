@@ -1,6 +1,6 @@
 [package]
 name = "termune"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Terminal library browser for Feiniu Music"
 repository = "https://github.com/Nyakooo/termune"
@@ -27,6 +27,7 @@ keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust",
 keyring = { version = "3.6.3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+self-replace = "1.5"
 keyring = { version = "3.6.3", features = ["windows-native"] }
 
 [profile.release]

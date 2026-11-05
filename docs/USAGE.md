@@ -38,7 +38,7 @@ cargo run --release
 
 配色、布局、显示模式、语言和断开连接统一放在 **F2 设置**。设置里 ↑↓ 选项、←→ 修改、Enter 确认；选择布局会启用专业模式，账户“断开连接”必须 Enter 或点击确认，左右箭头不会触发。F1 提供完整快捷键说明。M 为全局模式切换；输入框里的字母和数字仍是文本。
 
-播放需要 Linux 或 macOS 上安装 VLC，且 `vlc` 在 PATH 中。音频通过仅绑定 127.0.0.1 的随机路径音频桥接交给 VLC，NAS Token 不进入 VLC 参数或 URL；桥接在 Termune 内附加认证，并将 VLC 的 Range 请求转发给 NAS，使远端资源可 seek。进度和时长来自 VLC 控制接口，由后台线程查询，UI 不用本地计时器伪造进度。未知时长时显示 `--:--` 并禁用拖动；NAS 或格式不支持 Range/seek 时会报错。断开或退出停止播放器及桥接监听。
+播放需要安装 VLC（Linux / macOS / Windows），Linux 要求 `vlc` 在 PATH 中，macOS / Windows 也会识别常见安装目录。音频通过仅绑定 127.0.0.1 的随机路径音频桥接交给 VLC，NAS Token 不进入 VLC 参数或 URL；桥接在 Termune 内附加认证，并将 VLC 的 Range 请求转发给 NAS，使远端资源可 seek。进度和时长来自 VLC 控制接口，由后台线程查询，UI 不用本地计时器伪造进度。未知时长时显示 `--:--` 并禁用拖动；NAS 或格式不支持 Range/seek 时会报错。断开或退出停止播放器及桥接监听。
 
 四种模式均作用于开始播放时的来源（全部歌曲、搜索、专辑、歌手、歌单、风格或收藏），浏览其他分类不会改变当前播放来源。顺序模式到末尾停止；列表循环回到开头；单曲循环在自然结束时重播同一 GUID，手动切歌仍可跳过；随机选择来源中的其他歌曲。下一首按来源页码惰性获取，支持跨页；曲库发生变化导致队列失配时提示重新选曲。播放模式只在播放控制区展示和切换，不放在设置面板；点击标签或按 O 切换，选择仍保存到配置。
 
@@ -102,19 +102,5 @@ cargo run --release -- --diagnose
 
 无凭据的探测允许最多 5 次同源 HTTPS 重定向；跨源或跨端口跳转会结束该候选，继续探测官方返回的其他候选。认证请求不自动跟随跳转，防止转发密码摘要或 Cookie。中继模式在登录前就携带 `mode=relay`，认证后将其与 `music-token` 合并。若中继和直连都返回 `serverGUID`，比较身份后才选用直连。无中继身份基准时明确提示限制。
 
-## English
 
-A terminal music client for Feiniu Music. Run `cargo run --release`. Use M to toggle minimal/full globally outside text entry, F1 for help and F2 for settings. Keys 1–6 (or Alt+1–6) open all tracks, albums, artists, playlists, genres and favorites; Enter plays/opens, F toggles favorites, O cycles Sequence / Loop all / Repeat one / Shuffle, [ / ] changes tracks across pages within the original playback source. All letters and digits remain normal text in input fields.
-
-VLC receives a private loopback URL instead of a pipe or NAS credentials. The bridge forwards authenticated Range requests and strips cookies on cross-origin redirects. Background VLC IPC provides actual duration and position; click/drag the timeline or use Alt+Left/Right to seek. Unsupported/unknown durations disable seeking rather than fake progress. LRC lyrics follow real playback position at second-level precision, including pause and seeking. Plain text remains manual. Wheel/Alt+Up/Down scroll manually; Alt+Home resumes following. Artwork display is disabled as requested. Playback mode and appearance settings persist; passwords never do. Optional auto-login stores only validated session tokens in the OS keystore.
-
-
-Use `--diagnose` for the previously validated CLI checks: two pages per library type, song search, cover caching and a bounded audio Range request. `--login-only` runs just the login probe. HTTPS verification stays enabled; `--allow-lan-http` explicitly permits insecure local HTTP. No WebRTC/P2P tunnels or FN Connect access-code support.
-
-The user has confirmed real NAS login, four library lists, song search, cover retrieval and 206 Range access. The user has also verified TUI browsing, detail flows and audio playback on their NAS.
-
-Termune is an unofficial third-party client for Feiniu Music and is not affiliated with or endorsed by Feiniu.
-
-See [protocol notes](FEINIU_API.md).
-
-Professional layouts include 32-band PCM/FFT spectra with layout-specific shapes and theme colors. Optional FFmpeg must be on PATH; missing/failed analysis never interrupts VLC. Analysis uses a separate authenticated stream (extra network traffic), stops in minimal mode and on pause, and restarts after seeking. It is approximately synchronized with VLC, not sample-accurate. Saved-token restoration now has its own startup screen, bypassing the password form when validation succeeds.
+Windows 从 v0.1.1 起使用本机 TCP 控制 VLC，并支持 Credential Manager 自动登录、PowerShell 安装和命令行自更新。安装方法见 [项目首页](../README.md)。

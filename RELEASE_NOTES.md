@@ -1,3 +1,16 @@
+# Termune v0.1.1
+
+- 移除 README 宣传海报与英文文档，资源包只保留当前中文说明。
+- 添加 Linux / macOS 的 curl 安装脚本与 Windows 的 PowerShell 安装脚本，校验 SHA256，支持指定版本、用户安装目录和 PATH 配置。
+- 添加 Windows x86_64 / ARM64 构建与 ZIP 资源包。
+- Windows 使用本机 TCP 控制 VLC，支持播放、暂停、实际进度与拖动；自动识别 VLC 常见安装目录。
+- `termune update` 支持 Windows PE / 架构校验及运行中程序替换。
+- 发布前同时验证六个平台与安装脚本 fixture；Windows 的实际音频设备与 NAS 使用仍需真实设备验证。
+
+播放依赖 VLC，频谱可选依赖 FFmpeg；安装脚本不会自动安装这两个外部程序。安装方式及依赖说明见 README。
+
+---
+
 # Termune v0.1.0
 
 首个公开版本：在终端连接飞牛音乐，浏览并播放 NAS 中的音乐。
