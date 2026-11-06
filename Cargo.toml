@@ -1,6 +1,6 @@
 [package]
 name = "termune"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Terminal library browser for Feiniu Music"
 repository = "https://github.com/Nyakooo/termune"

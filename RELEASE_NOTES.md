@@ -1,3 +1,13 @@
+# Termune v0.1.4
+
+- 修复 Windows x64 / ARM64 的 VLC 动态库加载类型推断失败，显式指定跨平台 Library 类型与转换。
+- 修复 Linux ARM64 的音频回调测试编译失败，使用平台对应的 c_char，避免假定 C char 始终为有符号 i8。
+- 保留 v0.1.3 的音效、流畅切换和曲库界面改进。v0.1.3 因上述跨平台编译错误未完成自动发布。
+
+运行仍需与 Termune 架构一致的 VLC 3，不需要 FFmpeg。
+
+---
+
 # Termune v0.1.3
 
 - 音频链路改为 LibVLC 3 解码、程序内 DSP 与 CPAL 设备输出；音效提供原声、耳机空间、醇厚低音、现场和 Livehouse。

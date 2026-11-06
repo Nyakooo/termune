@@ -67,7 +67,7 @@ impl Api {
             }
             paths
         };
-        let library = paths
+        let library: libloading::Library = paths
             .into_iter()
             .find_map(|path| {
                 // Windows must resolve libvlccore.dll beside libvlc.dll as well.
@@ -76,7 +76,7 @@ impl Api {
                     unsafe {
                         libloading::os::windows::Library::load_with_flags(&path, 0x00000008)
                             .ok()
-                            .map(Into::into)
+                            .map(libloading::Library::from)
                     }
                 }
                 #[cfg(not(windows))]
@@ -491,16 +491,21 @@ mod tests {
             rendered: AtomicUsize::new(0),
         };
         let mut opaque = &shared as *const Shared as Ptr;
-        let mut format = [0i8; 4];
+        let mut format = [0u8; 4];
         let mut rate = 0;
         let mut channels = 0;
         unsafe {
             assert_eq!(
-                audio_setup(&mut opaque, format.as_mut_ptr(), &mut rate, &mut channels),
+                audio_setup(
+                    &mut opaque,
+                    format.as_mut_ptr().cast(),
+                    &mut rate,
+                    &mut channels
+                ),
                 0
             );
         }
-        assert_eq!(format.map(|v| v as u8), *b"S16N");
+        assert_eq!(format, *b"S16N");
         assert_eq!((rate, channels), (48000, 2));
         let samples = [8192i16, -16384, -4096, 12288];
         unsafe {
