@@ -241,7 +241,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
     );
     let help = if a.connected {
         if area.width >= 105 {
-            a.text("↑↓ 选择  Tab 分类  ←→ 翻页  Enter 播放/打开  / 搜索  M 极简  O 模式  ? 帮助  Q 退出","↑↓ Select  Tab Library  ←→ Page  Enter Play/Open  / Search  M Minimal  O Mode  ? Help  Q Quit")
+            a.text("↑↓ 选择  Tab 分类  ←→/hl 翻页  Enter 播放/打开  / 搜索  M 极简  O 模式  ? 帮助  Q 退出","↑↓ Select  Tab Library  ←→/hl Page  Enter Play/Open  / Search  M Minimal  O Mode  ? Help  Q Quit")
         } else if area.width >= 65 {
             a.text(
                 "↑↓ 选择  Tab 分类  Enter 播放/打开  / 搜索  M 极简  ? 帮助",
@@ -652,9 +652,9 @@ fn lyrics(f: &mut Frame, a: &mut App, r: Rect, p: Palette, boxed: bool) {
             .iter()
             .take(index)
             .map(|s| {
-                Line::from(s.as_str())
-                    .width()
-                    .div_ceil(inner.width.max(1) as usize)
+                Paragraph::new(s.as_str())
+                    .wrap(Wrap { trim: false })
+                    .line_count(inner.width.max(1))
                     .max(1)
             })
             .sum::<usize>()
@@ -665,9 +665,9 @@ fn lyrics(f: &mut Frame, a: &mut App, r: Rect, p: Palette, boxed: bool) {
         .lyrics
         .iter()
         .map(|s| {
-            Line::from(s.as_str())
-                .width()
-                .div_ceil(inner.width.max(1) as usize)
+            Paragraph::new(s.as_str())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width.max(1))
                 .max(1)
         })
         .sum();
@@ -698,6 +698,27 @@ fn lyrics(f: &mut Frame, a: &mut App, r: Rect, p: Palette, boxed: bool) {
         inner,
     );
     a.hits.push((inner, Action::LyricsScroll(0)));
+    let mut row = 0usize;
+    for (index, lyric) in a.media.lyrics.iter().enumerate() {
+        let height = Paragraph::new(lyric.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width.max(1))
+            .max(1);
+        let start = row.max(a.lyric_scroll);
+        let end = (row + height).min(a.lyric_scroll + inner.height as usize);
+        if start < end && a.media.times.get(index).copied().flatten().is_some() {
+            a.hits.push((
+                Rect::new(
+                    inner.x,
+                    inner.y + (start - a.lyric_scroll) as u16,
+                    inner.width,
+                    (end - start) as u16,
+                ),
+                Action::LyricLine(index),
+            ));
+        }
+        row += height;
+    }
 }
 fn media_sidebar(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     lyrics(f, a, r, p, true);
@@ -1223,7 +1244,7 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         ),
         ("F", a.text("收藏 / 取消收藏", "Toggle favorite")),
         (
-            "Alt+← / →",
+            "Ctrl+←→ / h l",
             a.text(
                 "快退 / 快进 5 秒；进度条可点击拖动",
                 "Seek 5 seconds; click/drag timeline",
@@ -1242,7 +1263,7 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             ),
         ),
         (
-            "← / → · PgUp / PgDn",
+            "←→ / h l / PgUp / PgDn",
             a.text("上一页 / 下一页", "Previous / next page"),
         ),
         (

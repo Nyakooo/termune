@@ -149,15 +149,15 @@ impl Shared {
         let mut queue = self.samples.lock().unwrap_or_else(|e| e.into_inner());
         for frame in output {
             *frame = if self.paused.load(Ordering::Relaxed) {
-                [0.0; 2]
+                dsp.render(None)
             } else {
                 match queue.pop_front() {
                     Some(sample) => {
                         #[cfg(test)]
                         self.rendered.fetch_add(1, Ordering::Relaxed);
-                        dsp.process(sample)
+                        dsp.render(Some(sample))
                     }
-                    None => [0.0; 2],
+                    None => dsp.render(None),
                 }
             };
         }
@@ -185,7 +185,7 @@ unsafe extern "C" fn audio_play(data: Ptr, samples: *const c_void, count: u32, _
     let samples = unsafe { std::slice::from_raw_parts(samples as *const i16, count as usize * 2) };
     let mut queue = shared.samples.lock().unwrap_or_else(|e| e.into_inner());
     for frame in samples.as_chunks::<2>().0 {
-        while queue.len() >= shared.rate as usize / 10 && !shared.closing.load(Ordering::Relaxed) {
+        while queue.len() >= shared.rate as usize / 3 && !shared.closing.load(Ordering::Relaxed) {
             let result = shared
                 .wake
                 .wait_timeout(queue, Duration::from_millis(20))
@@ -263,8 +263,12 @@ impl Decoder {
                 .map_err(|e| format!("无法读取音频设备：{e}"))?
         };
         let rate = config.sample_rate().0;
+        let mut output_config: cpal::StreamConfig = config.clone().into();
+        if let cpal::SupportedBufferSize::Range { min, max } = config.buffer_size() {
+            output_config.buffer_size = cpal::BufferSize::Fixed(512u32.clamp(*min, *max));
+        }
         let shared = Arc::new(Shared {
-            samples: Mutex::new(VecDeque::with_capacity(rate as usize / 10)),
+            samples: Mutex::new(VecDeque::with_capacity(rate as usize / 3)),
             wake: Condvar::new(),
             closing: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -280,21 +284,15 @@ impl Decoder {
             None
         } else {
             Some(match config.sample_format() {
-                cpal::SampleFormat::F32 => output::<f32>(
-                    device.as_ref().unwrap(),
-                    &config.clone().into(),
-                    shared.clone(),
-                )?,
-                cpal::SampleFormat::I16 => output::<i16>(
-                    device.as_ref().unwrap(),
-                    &config.clone().into(),
-                    shared.clone(),
-                )?,
-                cpal::SampleFormat::U16 => output::<u16>(
-                    device.as_ref().unwrap(),
-                    &config.clone().into(),
-                    shared.clone(),
-                )?,
+                cpal::SampleFormat::F32 => {
+                    output::<f32>(device.as_ref().unwrap(), &output_config, shared.clone())?
+                }
+                cpal::SampleFormat::I16 => {
+                    output::<i16>(device.as_ref().unwrap(), &output_config, shared.clone())?
+                }
+                cpal::SampleFormat::U16 => {
+                    output::<u16>(device.as_ref().unwrap(), &output_config, shared.clone())?
+                }
                 format => return Err(format!("暂不支持音频设备格式 {format:?}")),
             })
         };
@@ -429,6 +427,21 @@ fn output<T: cpal::SizedSample + cpal::FromSample<f32>>(
     config: &cpal::StreamConfig,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream> {
+    match output_with_config::<T>(device, config, shared.clone()) {
+        Ok(stream) => Ok(stream),
+        Err(_) if matches!(config.buffer_size, cpal::BufferSize::Fixed(_)) => {
+            let mut fallback = config.clone();
+            fallback.buffer_size = cpal::BufferSize::Default;
+            output_with_config::<T>(device, &fallback, shared)
+        }
+        Err(error) => Err(error),
+    }
+}
+fn output_with_config<T: cpal::SizedSample + cpal::FromSample<f32>>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    shared: Arc<Shared>,
+) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
     let errors = shared.clone();
     let mut dsp = Processor::new(
@@ -476,6 +489,65 @@ fn output<T: cpal::SizedSample + cpal::FromSample<f32>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_switch_changes_pcm_beyond_simple_volume_gain() {
+        let shared = Shared {
+            samples: Mutex::new(VecDeque::with_capacity(480)),
+            wake: Condvar::new(),
+            closing: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            effect: AtomicUsize::new(0),
+            volume: AtomicU16::new(100),
+            reset: AtomicBool::new(false),
+            error: Mutex::new(None),
+            rate: 48000,
+            rendered: AtomicUsize::new(0),
+        };
+        let mut dsp = Processor::new(48000, 0, 100);
+        for effect in 1..5 {
+            shared.effect.store(effect, Ordering::Relaxed);
+            let mut source_energy = 0.0f64;
+            let mut output_energy = 0.0f64;
+            let mut dot = 0.0f64;
+            for block in 0..80 {
+                let samples: Vec<i16> = (0..480)
+                    .flat_map(|i| {
+                        let t = (block * 480 + i) as f32 / 48000.0;
+                        let l = (t * std::f32::consts::TAU * 90.0).sin() * 0.2
+                            + (t * std::f32::consts::TAU * 1700.0).sin() * 0.1;
+                        let r = (t * std::f32::consts::TAU * 330.0).sin() * 0.2;
+                        [(l * 32768.0) as i16, (r * 32768.0) as i16]
+                    })
+                    .collect();
+                unsafe {
+                    audio_play(
+                        &shared as *const Shared as Ptr,
+                        samples.as_ptr().cast(),
+                        480,
+                        0,
+                    );
+                }
+                let mut output = [[0.0; 2]; 480];
+                shared.take(&mut output, &mut dsp);
+                if block > 40 {
+                    for (input, output) in samples.as_chunks::<2>().0.iter().zip(output) {
+                        for c in 0..2 {
+                            let x = input[c] as f64 / 32768.0;
+                            let y = output[c] as f64;
+                            source_energy += x * x;
+                            output_energy += y * y;
+                            dot += x * y;
+                        }
+                    }
+                }
+            }
+            let residual = (output_energy - dot * dot / source_energy) / output_energy;
+            assert!(
+                residual > 0.0025,
+                "effect {effect}: only gain changed, residual {residual}"
+            );
+        }
+    }
     #[test]
     fn callback_negotiates_s16_and_preserves_each_channel() {
         let shared = Shared {

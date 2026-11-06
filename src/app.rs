@@ -144,6 +144,7 @@ pub enum Action {
     NextTrack,
     Disconnect,
     LyricsScroll(isize),
+    LyricLine(usize),
     Seek(f64),
     CycleMode,
     CycleEffect,
@@ -1251,6 +1252,15 @@ impl App {
             self.media.loading = false;
         }
     }
+    fn seek_relative(&mut self, seconds: f64) {
+        self.seek_drag = None;
+        if let Some(player) = self.player.as_mut() {
+            let duration = player.timeline.duration;
+            if let Err(error) = player.seek((player.timeline.position + seconds) / duration) {
+                self.fail(error);
+            }
+        }
+    }
     fn adjacent_track(&mut self, delta: isize) {
         self.advance(delta > 0, false);
     }
@@ -1317,6 +1327,25 @@ impl App {
             Action::Previous => self.page(false),
             Action::Next => self.page(true),
             Action::Select => self.select(),
+            Action::LyricLine(index) => {
+                let matching = self
+                    .playing_item
+                    .as_ref()
+                    .and_then(|item| item["guid"].as_str())
+                    .is_some_and(|guid| self.media.key == format!("track:{guid}"));
+                if matching
+                    && let Some(seconds) = self.media.times.get(index).copied().flatten()
+                    && let Some(player) = self.player.as_mut()
+                {
+                    let duration = player.timeline.duration;
+                    if let Err(error) = player.seek(seconds / duration) {
+                        self.fail(error);
+                    } else {
+                        self.lyrics_follow = true;
+                        self.seek_drag = None;
+                    }
+                }
+            }
             Action::LyricsScroll(delta) => {
                 if delta != 0 {
                     self.lyrics_follow = false;
@@ -1488,23 +1517,15 @@ impl App {
                 return;
             }
             if matches!(key.code, KeyCode::Left | KeyCode::Right) {
-                if let Some(player) = &mut self.player {
-                    let delta = if key.code == KeyCode::Right {
-                        5.0
-                    } else {
-                        -5.0
-                    };
-                    if player.timeline.duration > 0.0 {
-                        let fraction =
-                            (player.timeline.position + delta) / player.timeline.duration;
-                        if let Err(e) = player.seek(fraction) {
-                            self.fail(e);
-                        }
-                    }
-                }
+                self.seek_relative(if key.code == KeyCode::Right {
+                    5.0
+                } else {
+                    -5.0
+                });
                 return;
             }
         }
+
         if !self.connected {
             if key.code == KeyCode::Esc {
                 if self.busy {
@@ -1585,6 +1606,20 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(
+                key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')
+            )
+        {
+            self.seek_relative(if matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+                5.0
+            } else {
+                -5.0
+            });
             return;
         }
         if key
@@ -1683,7 +1718,9 @@ impl App {
                         self.last_click = Some((mouse.column, mouse.row, now));
                     }
                     if let Some(action) = action {
-                        self.action(action);
+                        if !matches!(action, Action::LyricLine(_)) || double {
+                            self.action(action);
+                        }
                         if double && matches!(action, Action::Row(_)) {
                             self.action(Action::Select);
                         }
@@ -1693,7 +1730,7 @@ impl App {
                     if self.connected && self.settings.is_none() && !self.help =>
                 {
                     if self.hits.iter().any(|(r, a)| {
-                        matches!(a, Action::LyricsScroll(_))
+                        matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
                             && r.contains((mouse.column, mouse.row).into())
                     }) {
                         self.action(Action::LyricsScroll(3));
@@ -1705,7 +1742,7 @@ impl App {
                     if self.connected && self.settings.is_none() && !self.help =>
                 {
                     if self.hits.iter().any(|(r, a)| {
-                        matches!(a, Action::LyricsScroll(_))
+                        matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
                             && r.contains((mouse.column, mouse.row).into())
                     }) {
                         self.action(Action::LyricsScroll(-3));

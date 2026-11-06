@@ -745,3 +745,53 @@ fn effect_shortcut_cycles_five_presets_and_saves_selection() {
         );
     }
 }
+
+#[test]
+fn ctrl_seek_keys_do_not_replace_plain_paging() {
+    let mut app = app();
+    app.connected = true;
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    app.views[TRACKS].page = 1;
+    app.views[TRACKS].total = 100;
+    for code in [
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Char('h'),
+        KeyCode::Char('l'),
+    ] {
+        app.key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        assert!(commands.try_recv().is_err());
+    }
+    key(&mut app, KeyCode::Char('l'));
+    assert!(matches!(commands.try_recv().unwrap(), Command::Load(_)));
+}
+
+#[test]
+fn lyric_hit_regions_follow_word_wrapping_and_skip_plain_text() {
+    let mut app = app();
+    app.connected = true;
+    app.config.professional = true;
+    app.media.lyrics = vec![
+        "a long lyric with words that wraps over several visual rows in the lyric panel".into(),
+        "plain lyric without timestamp".into(),
+        "last timed lyric".into(),
+    ];
+    app.media.times = vec![Some(0.0), None, Some(15.0)];
+    render(&mut app, 120, 40);
+    let timed: Vec<_> = app
+        .hits
+        .iter()
+        .filter_map(|(rect, action)| {
+            if let Action::LyricLine(index) = action {
+                Some((*rect, *index))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(timed.iter().any(|(_, i)| *i == 0));
+    assert!(timed.iter().all(|(_, i)| *i != 1));
+    assert!(timed.iter().any(|(_, i)| *i == 2));
+    assert!(timed.iter().find(|(_, i)| *i == 0).unwrap().0.height > 1);
+}

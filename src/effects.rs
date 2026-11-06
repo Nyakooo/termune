@@ -154,14 +154,14 @@ struct Profile {
 impl Profile {
     fn new(effect: Effect, rate: f32) -> Self {
         let (bass, feedback, wet, crossfeed, width, gain_db) = match effect {
-            Effect::Spatial => (0.0, 0.55, 0.10, 0.20, 1.0, -1.0),
-            Effect::Bass => (4.0, 0.0, 0.0, 0.0, 1.0, -4.0),
-            Effect::Live => (1.0, 0.80, 0.24, 0.0, 1.10, -2.5),
-            Effect::Livehouse => (2.5, 0.57, 0.14, 0.0, 1.04, -3.0),
+            Effect::Spatial => (0.0, 0.62, 0.45, 0.30, 1.25, -1.0),
+            Effect::Bass => (7.0, 0.0, 0.0, 0.0, 1.0, -2.0),
+            Effect::Live => (1.0, 0.80, 1.10, 0.0, 1.20, -2.5),
+            Effect::Livehouse => (3.5, 0.57, 0.80, 0.0, 1.08, -2.0),
             _ => (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
         };
         Self {
-            eq: Biquad::shelf(rate, 110.0, bass),
+            eq: Biquad::shelf(rate, 160.0, bass),
             rooms: [
                 Room::new(rate, false, feedback),
                 Room::new(rate, true, feedback),
@@ -208,6 +208,10 @@ pub struct Processor {
     volume_fade: f32,
     limiter: f32,
     release: f32,
+    edge_last: [f32; 2],
+    edge_from: [f32; 2],
+    edge_mix: f32,
+    edge_step: f32,
 }
 impl Processor {
     pub fn new(rate: u32, effect: usize, volume: u16) -> Self {
@@ -231,9 +235,14 @@ impl Processor {
             volume_fade: 1.0 - (-1.0 / (rate * 0.01)).exp(),
             limiter: 1.0,
             release: 1.0 - (-1.0 / (rate * 0.06)).exp(),
+            edge_last: [0.0; 2],
+            edge_from: [0.0; 2],
+            edge_mix: 1.0,
+            edge_step: 1.0 / (rate * 0.005),
         }
     }
     pub fn reset(&mut self, effect: usize, volume: u16) {
+        self.edge_mix = 0.0;
         self.target = Effect::from_index(effect) as usize;
         self.weights = [0.0; 5];
         self.weights[self.target] = 1.0;
@@ -264,6 +273,22 @@ impl Processor {
         self.target = Effect::from_index(effect) as usize;
         self.target_volume = volume.min(100) as f32 / 100.0;
     }
+    pub fn render(&mut self, sample: Option<[f32; 2]>) -> [f32; 2] {
+        self.edge_last = if let Some(sample) = sample {
+            if self.edge_mix == 0.0 {
+                self.edge_from = self.edge_last;
+            }
+            let output = self.process(sample);
+            self.edge_mix = (self.edge_mix + self.edge_step).min(1.0);
+            std::array::from_fn(|c| {
+                output[c] * self.edge_mix + self.edge_from[c] * (1.0 - self.edge_mix)
+            })
+        } else {
+            self.edge_mix = 0.0;
+            self.edge_last.map(|v| v * (1.0 - self.edge_step))
+        };
+        self.edge_last
+    }
     pub fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
         let input = input.map(|v| if v.is_finite() { v } else { 0.0 });
         for i in 0..5 {
@@ -292,6 +317,37 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn underrun_pause_and_seek_edges_are_smoothed() {
+        let mut dsp = Processor::new(48000, 0, 100);
+        let mut last = dsp.render(Some([0.8; 2]));
+        for sample in
+            std::iter::repeat_n(None, 2400).chain(std::iter::repeat_n(Some([-0.8; 2]), 2400))
+        {
+            let output = dsp.render(sample);
+            assert!((output[0] - last[0]).abs() < 0.02);
+            last = output;
+        }
+        dsp.reset(0, 100);
+        assert!((dsp.render(Some([0.8; 2]))[0] - last[0]).abs() < 0.02);
+    }
+    #[test]
+    fn venue_presets_have_audible_wet_energy() {
+        for effect in [Effect::Live, Effect::Livehouse] {
+            let mut dsp = Processor::new(48000, effect as usize, 100);
+            let first = dsp.process([0.5; 2]);
+            let dry = first.iter().map(|v| v * v).sum::<f32>();
+            let mut tail = 0.0;
+            for _ in 0..48000 {
+                tail += dsp.process([0.0; 2]).iter().map(|v| v * v).sum::<f32>();
+            }
+            assert!(
+                tail / dry > 0.005,
+                "{effect:?}: wet/dry energy {}",
+                tail / dry
+            );
+        }
+    }
     #[test]
     fn all_presets_preserve_left_dry_channel_and_stay_finite() {
         for effect in 0..5 {
