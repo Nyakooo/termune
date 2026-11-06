@@ -364,7 +364,7 @@ impl Decoder {
         }
         Ok(result)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn player_id_for_test(&self) -> usize {
         self.player as usize
     }

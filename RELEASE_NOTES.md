@@ -1,3 +1,10 @@
+# Termune v0.1.5
+
+- 修复 Windows x64 / ARM64 的严格 Clippy 检查：仅被 Unix 集成测试调用的播放器身份辅助方法，现在只在 Unix 测试构建中编译，避免 Windows 下的 dead_code 错误。
+- 保留 v0.1.4 的动态库加载与 ARM64 字符类型修复，以及 v0.1.3 的音效和曲库改进。
+
+---
+
 # Termune v0.1.4
 
 - 修复 Windows x64 / ARM64 的 VLC 动态库加载类型推断失败，显式指定跨平台 Library 类型与转换。
