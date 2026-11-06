@@ -1,4 +1,4 @@
-use crate::app::{Action, App, artists, clean, name};
+use crate::app::{Action, App, FAVORITES, KINDS, TRACKS, artists, clean, name};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 const THEMES: [&str; 5] = ["Mint", "Amber", "Violet", "Ocean", "Mono"];
-const LAYOUTS: [&str; 5] = ["Airwave", "Night Receiver", "Operations", "Tracker", "Btop"];
+const LAYOUTS: [&str; 4] = ["Airwave", "Operations", "Tracker", "Btop"];
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Palette {
     bg: Color,
@@ -123,11 +123,10 @@ fn line(r: Rect, y: u16) -> Rect {
 }
 fn label(a: &App, i: usize) -> &str {
     match i {
-        0 => a.text("全部歌曲", "All songs"),
-        1 => a.text("专辑", "Albums"),
-        2 => a.text("歌手", "Artists"),
-        3 => a.text("歌单", "Playlists"),
-        4 => a.text("风格", "Genres"),
+        0 => a.text("专辑", "Albums"),
+        1 => a.text("歌手", "Artists"),
+        2 => a.text("风格", "Genres"),
+        3 => a.text("全部歌曲", "All songs"),
         _ => a.text("收藏", "Favorites"),
     }
 }
@@ -242,16 +241,16 @@ pub fn draw(f: &mut Frame, a: &mut App) {
     );
     let help = if a.connected {
         if area.width >= 105 {
-            a.text("↑↓ 选择  Tab 分类  ←→ 翻页  Enter 播放/打开  / 搜索  I 详情  M 极简  O 模式  F1 帮助  Q 退出","↑↓ Select  Tab Library  ←→ Page  Enter Play/Open  / Search  I Info  M Minimal  O Mode  F1 Help  Q Quit")
+            a.text("↑↓ 选择  Tab 分类  ←→ 翻页  Enter 播放/打开  / 搜索  M 极简  O 模式  ? 帮助  Q 退出","↑↓ Select  Tab Library  ←→ Page  Enter Play/Open  / Search  M Minimal  O Mode  ? Help  Q Quit")
         } else if area.width >= 65 {
             a.text(
-                "↑↓ 选择  Tab 分类  Enter 播放/打开  / 搜索  M 极简  F1 帮助",
-                "↑↓ Select  Tab Library  Enter Play/Open  / Search  M Minimal  F1 Help",
+                "↑↓ 选择  Tab 分类  Enter 播放/打开  / 搜索  M 极简  ? 帮助",
+                "↑↓ Select  Tab Library  Enter Play/Open  / Search  M Minimal  ? Help",
             )
         } else {
             a.text(
-                "↑↓选择 Tab分类 ↵打开 /搜索 F1帮助",
-                "↑↓ Select Tab Library ↵ Open / Find F1 Help",
+                "↑↓选择 Tab分类 ↵打开 /搜索 ?帮助",
+                "↑↓ Select Tab Library ↵ Open / Find ? Help",
             )
         }
     } else if a.restoring {
@@ -261,22 +260,19 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         )
     } else if area.width < 60 {
         a.text(
-            "Tab 切换 ↵ 确认 Esc 退出 F1 帮助",
-            "Tab Focus ↵ Connect Esc Quit F1 Help",
+            "Tab 切换 ↵ 确认 Esc 退出 ? 帮助",
+            "Tab Focus ↵ Connect Esc Quit ? Help",
         )
     } else {
         a.text(
-            "Tab 切换  空格 勾选  Enter 确认  Esc 退出  F1 帮助",
-            "Tab Focus  Space Check  Enter Connect  Esc Quit  F1 Help",
+            "Tab 切换  空格 勾选  Enter 确认  Esc 退出  ? 帮助",
+            "Tab Focus  Space Check  Enter Connect  Esc Quit  ? Help",
         )
     };
     text(f, line(footer, 1), help, p.dim);
-    if a.info.is_some() || a.editing || a.settings.is_some() || a.help {
+    if a.editing || a.settings.is_some() || a.help {
         a.hits.clear();
         f.render_widget(Block::default().style(Style::default().bg(p.bg)), footer);
-    }
-    if a.info.is_some() {
-        info(f, a, area, p);
     }
     if a.editing {
         search(f, a, area, p);
@@ -300,7 +296,7 @@ fn header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         f,
         a,
         cols[1],
-        a.text("[F2 设置]", "[F2 Settings]"),
+        a.text("[P 设置]", "[P Settings]"),
         Action::Settings,
         p,
     );
@@ -323,7 +319,7 @@ fn header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
                 a.server,
                 a.username,
                 if a.config.professional {
-                    LAYOUTS[a.config.layout % 5]
+                    LAYOUTS[a.config.layout % 4]
                 } else {
                     a.text("极简", "Minimal")
                 },
@@ -476,7 +472,7 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         player_panel(f, a, rows[1], p, false, false, None);
         return;
     }
-    match a.config.layout % 5 {
+    match a.config.layout % 4 {
         0 => {
             let cols = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .spacing(3)
@@ -485,14 +481,7 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             library(f, a, cols[1], p, false, false);
         }
         1 => {
-            let rows = Layout::vertical([Constraint::Length(11), Constraint::Min(5)])
-                .spacing(1)
-                .split(r);
-            player_panel(f, a, rows[0], p, true, false, Some("NIGHT RECEIVER"));
-            presets(f, a, rows[1], p);
-        }
-        2 => {
-            let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(9)])
+            let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(13)])
                 .spacing(1)
                 .split(r);
             let cols = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
@@ -502,15 +491,15 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             media_sidebar(f, a, cols[1], p);
             player_panel(f, a, rows[1], p, true, false, Some("OPERATIONS"));
         }
-        3 => {
-            let rows = Layout::vertical([Constraint::Length(10), Constraint::Min(5)])
+        2 => {
+            let rows = Layout::vertical([Constraint::Length(13), Constraint::Min(5)])
                 .spacing(1)
                 .split(r);
             player_panel(f, a, rows[0], p, false, false, Some("TRACKER"));
             library(f, a, rows[1], p, false, true);
         }
         _ => {
-            let rows = Layout::vertical([Constraint::Length(11), Constraint::Min(5)])
+            let rows = Layout::vertical([Constraint::Length(14), Constraint::Min(5)])
                 .spacing(1)
                 .split(r);
             player_panel(f, a, rows[0], p, true, false, Some("BTOP"));
@@ -529,7 +518,7 @@ fn selected(a: &App) -> Option<&serde_json::Value> {
         .and_then(|i| a.view().items.get(i))
 }
 fn track_mode(a: &App) -> bool {
-    matches!(a.section, 0 | 5) || a.query.is_some() || a.detail.is_some()
+    matches!(a.section, TRACKS | FAVORITES) || a.query.is_some() || a.detail.is_some()
 }
 fn player_panel(
     f: &mut Frame,
@@ -577,7 +566,6 @@ fn player_panel(
         if spacious {
             let rows = Layout::vertical([
                 Constraint::Length(4),
-                Constraint::Length(5),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ])
@@ -586,26 +574,15 @@ fn player_panel(
             text(f, line(rows[0], 0), state, p.secondary);
             text(f, line(rows[0], 1), title, p.accent);
             text(f, line(rows[0], 3), a.media.artist.clone(), p.dim);
-            spectrum(f, a, rows[1], p);
-            lyrics(f, a, rows[2], p, false);
-            playback_controls(f, a, rows[3], p);
+            lyrics(f, a, rows[1], p, false);
+            playback_controls(f, a, rows[2], p);
         } else {
             let cols = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .spacing(2)
                 .split(inner);
             text(f, line(cols[0], 0), state, p.secondary);
             text(f, line(cols[0], 1), title, p.accent);
-            spectrum(
-                f,
-                a,
-                Rect::new(
-                    cols[0].x,
-                    cols[0].y + 2,
-                    cols[0].width,
-                    cols[0].height.saturating_sub(5),
-                ),
-                p,
-            );
+            text(f, line(cols[0], 3), a.media.artist.clone(), p.dim);
             playback_controls(
                 f,
                 a,
@@ -632,94 +609,6 @@ fn player_panel(
             ),
             p,
         );
-    }
-}
-
-/// Every style uses the same measured frequency bands; idle is never animated.
-fn spectrum(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
-    if r.width == 0 || r.height == 0 {
-        return;
-    }
-    let paused = a.player.as_ref().is_some_and(|v| v.paused);
-    let unavailable = a.player.as_ref().is_some_and(|v| v.spectrum_unavailable);
-    let frame = a.player.as_mut().and_then(|v| v.spectrum_frame());
-    if paused || frame.is_none() {
-        let label = if paused {
-            a.text("频谱 · 已暂停", "Spectrum · paused")
-        } else if unavailable {
-            a.text(
-                "频谱不可用 · 请检查 FFmpeg",
-                "Spectrum unavailable · check FFmpeg",
-            )
-        } else {
-            a.text("频谱 · 等待音频", "Spectrum · awaiting audio")
-        };
-        text(f, line(r, 0), label, p.dim);
-        return;
-    }
-    draw_spectrum(f, r, &frame.unwrap(), a.config.layout, a.config.theme, p);
-}
-fn draw_spectrum(
-    f: &mut Frame,
-    r: Rect,
-    bands: &[f32; crate::spectrum::BANDS],
-    layout: usize,
-    theme: usize,
-    p: Palette,
-) {
-    if r.width == 0 || r.height == 0 {
-        return;
-    }
-    let style = layout % 5;
-    let stride = if style == 0 || style == 4 { 3 } else { 2 };
-    let count = (r.width as usize).div_ceil(stride);
-    for x in 0..count {
-        let begin = x * bands.len() / count;
-        let end = ((x + 1) * bands.len() / count)
-            .max(begin + 1)
-            .min(bands.len());
-        let level = bands[begin.min(bands.len() - 1)..end]
-            .iter()
-            .copied()
-            .fold(0.0f32, f32::max);
-        let height = level * r.height as f32;
-        for y in 0..r.height {
-            let distance = if style == 1 {
-                ((y as f32 + 0.5) - r.height as f32 / 2.0).abs() * 2.0
-            } else {
-                (r.height - y - 1) as f32
-            };
-            let filled = height - distance;
-            let glyph = if filled <= 0.0 {
-                " "
-            } else if style == 3 {
-                "•"
-            } else if style == 4 {
-                "▬"
-            } else if style == 2 {
-                "▰"
-            } else if theme % 5 == 1 {
-                "▮"
-            } else if filled < 0.5 {
-                "▄"
-            } else {
-                "█"
-            };
-            let color = if y < r.height / 3 {
-                p.accent
-            } else {
-                p.secondary
-            };
-            let width = if style == 0 { 2 } else { 1 };
-            for dx in 0..width {
-                let xx = r.x + (x * stride + dx) as u16;
-                if xx < r.right() {
-                    f.buffer_mut()[(xx, r.y + y)]
-                        .set_symbol(glyph)
-                        .set_fg(color);
-                }
-            }
-        }
     }
 }
 
@@ -905,14 +794,54 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     }
     if r.height >= 3 {
         let label = format!("[ {} ]", a.config.playback_mode.label(a.config.english));
-        button(f, a, line(r, 2), &label, Action::CycleMode, p);
+        let controls = Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+        ])
+        .split(line(r, 2));
+        button(f, a, controls[0], &label, Action::CycleMode, p);
+        let effect =
+            crate::effects::Effect::from_index(a.config.audio_effect).label(a.config.english);
+        let label = format!("[ E {} ]", effect);
+        button(f, a, controls[1], &label, Action::CycleEffect, p);
+        let volume = a
+            .player
+            .as_ref()
+            .map(|v| v.volume)
+            .unwrap_or(a.config.volume.min(100));
+        let filled = usize::from(volume).div_ceil(20);
+        let label = format!(
+            "− {}{} {}% +",
+            "▰".repeat(filled),
+            "▱".repeat(5 - filled),
+            volume
+        );
+        let halves = Layout::horizontal([Constraint::Percentage(50); 2]).split(controls[2]);
+        text(f, controls[2], label, p.accent);
+        a.hits.push((halves[0], Action::Volume(-5)));
+        a.hits.push((halves[1], Action::Volume(5)));
     }
 }
 fn tabs(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
-    let cells = Layout::horizontal([Constraint::Ratio(1, 6); 6]).split(r);
-    for i in 0..6 {
+    let widths: Vec<u16> = (0..KINDS.len())
+        .map(|i| Line::from(label(a, i)).width() as u16 + 4)
+        .collect();
+    let mut start = 0;
+    while start < a.section
+        && widths[start..=a.section].iter().sum::<u16>() + (a.section - start) as u16 * 2 > r.width
+    {
+        start += 1;
+    }
+    let mut x = r.x;
+    for (i, width) in widths.iter().enumerate().skip(start) {
+        if x >= r.right() {
+            break;
+        }
+        let width = (*width).min(r.right() - x);
+        let cell = Rect::new(x, r.y, width, r.height.min(1));
         let text = format!(
-            " {} {}",
+            " {} {} ",
             if a.section == i { "›" } else { " " },
             label(a, i)
         );
@@ -924,8 +853,9 @@ fn tabs(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         } else {
             Style::default().fg(p.dim)
         };
-        f.render_widget(Paragraph::new(text).style(style), cells[i]);
-        a.hits.push((cells[i], Action::Section(i)));
+        f.render_widget(Paragraph::new(text).style(style), cell);
+        a.hits.push((cell, Action::Section(i)));
+        x = x.saturating_add(width + 2);
     }
 }
 fn title(a: &App) -> String {
@@ -1038,7 +968,7 @@ fn library(f: &mut Frame, a: &mut App, r: Rect, p: Palette, boxed: bool, detaile
             let mut cells = vec![
                 Cell::from(format!("{:02}", base + i as u64 + 1)).style(Style::default().fg(p.dim)),
                 Cell::from(
-                    if track && v["isFavorite"].as_bool().unwrap_or(a.section == 5) {
+                    if track && v["isFavorite"].as_bool().unwrap_or(a.section == FAVORITES) {
                         format!("★ {}", name(v, "title"))
                     } else {
                         name(v, if track { "title" } else { "name" })
@@ -1094,55 +1024,6 @@ fn library(f: &mut Frame, a: &mut App, r: Rect, p: Palette, boxed: bool, detaile
     }
     pagination(f, a, parts[3], p);
 }
-fn presets(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
-    let parts = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(r);
-    tabs(f, a, parts[0], p);
-    let grid = parts[2];
-    let cols = if r.width >= 100 { 3 } else { 2 };
-    let rows = grid.height / 4;
-    let capacity = (cols * rows).max(1) as usize;
-    let selected = a.view().table.selected().unwrap_or(0);
-    let start = selected / capacity * capacity;
-    for index in start..(start + capacity).min(a.view().items.len()) {
-        let n = (index - start) as u16;
-        let w = grid.width / cols;
-        let cell = Rect::new(
-            grid.x + n % cols * w,
-            grid.y + n / cols * 4,
-            w.saturating_sub(1),
-            3,
-        );
-        let active = index == selected;
-        let block = pane(
-            format!("{:02}", (a.view().page.max(1) - 1) * 50 + index as u64 + 1),
-            p,
-            active,
-        );
-        let inner = block.inner(cell);
-        let item = &a.view().items[index];
-        f.render_widget(
-            block.style(Style::default().bg(if active { p.selected } else { p.panel })),
-            cell,
-        );
-        text(
-            f,
-            inner,
-            name(item, if track_mode(a) { "title" } else { "name" }),
-            if active { p.accent } else { p.fg },
-        );
-        a.hits.push((cell, Action::Row(index)));
-    }
-    if a.view().items.is_empty() {
-        empty(f, a, grid, p);
-    }
-    pagination(f, a, parts[3], p);
-}
 fn inspector(f: &mut Frame, a: &App, r: Rect, p: Palette, overview: bool) {
     let block = pane(
         a.text(
@@ -1165,7 +1046,7 @@ fn inspector(f: &mut Frame, a: &App, r: Rect, p: Palette, overview: bool) {
     f.render_widget(block, r);
     let mut lines = vec![];
     if overview {
-        for i in 0..6 {
+        for i in 0..KINDS.len() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<8}", label(a, i)), Style::default().fg(p.dim)),
                 Span::styled(
@@ -1229,7 +1110,7 @@ fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     .map(str::to_owned);
     let values = [
         THEMES[a.config.theme % 5].to_owned(),
-        LAYOUTS[a.config.layout % 5].to_owned(),
+        LAYOUTS[a.config.layout % 4].to_owned(),
         a.text(
             if a.config.professional {
                 "专业"
@@ -1290,8 +1171,8 @@ fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         f,
         line(inner, 11),
         a.text(
-            "↑↓ 选择  ←→ 更改  Enter 确认  Esc 返回",
-            "↑↓ Select  ←→ Change  Enter Apply  Esc Back",
+            "↑↓/jk 选择  ←→/hl 更改  Enter 确认  Esc 返回",
+            "↑↓/jk Select  ←→/hl Change  Enter Apply  Esc Back",
         ),
         p.dim,
     );
@@ -1311,9 +1192,9 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         p,
     );
     let rows = [
-        ("F1", a.text("帮助", "Help")),
+        ("?", a.text("帮助", "Help")),
         (
-            "F2",
+            "P",
             a.text(
                 "设置：配色、布局、显示、语言、断开连接",
                 "Settings: palette, layout, display, language, account",
@@ -1334,9 +1215,9 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             ),
         ),
         (
-            "1…6",
+            "1…5",
             a.text(
-                "全部 / 专辑 / 歌手 / 歌单 / 风格 / 收藏",
+                "专辑 / 歌手 / 风格 / 全部歌曲 / 收藏",
                 "Tracks / albums / artists / lists / genres / favorites",
             ),
         ),
@@ -1367,8 +1248,8 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         (
             "Enter",
             a.text(
-                "播放歌曲 / 打开专辑、歌手或歌单",
-                "Play track / open album, artist or playlist",
+                "播放歌曲 / 打开专辑、歌手或风格",
+                "Play track / open album, artist or genre",
             ),
         ),
         (
@@ -1382,6 +1263,13 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             "[ / ]",
             a.text("播放队列上一首 / 下一首", "Previous / next track in queue"),
         ),
+        (
+            "E",
+            a.text(
+                "音效：原声 / 耳机空间 / 低音 / 现场 / Livehouse",
+                "Effects: original / headphone / bass / live / Livehouse",
+            ),
+        ),
         ("S", a.text("停止播放", "Stop playback")),
         (
             "Alt+↑ / ↓",
@@ -1392,7 +1280,6 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         ),
         ("/", a.text("搜索歌曲", "Search songs")),
         ("R", a.text("刷新当前页", "Refresh page")),
-        ("I", a.text("歌曲信息", "Song details")),
         (
             "Esc",
             a.text(
@@ -1438,82 +1325,4 @@ fn search(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
         Paragraph::new(lines).style(Style::default().fg(p.fg)),
         inner,
     );
-}
-fn info(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
-    let Some(item) = &app.info else {
-        return;
-    };
-    let modal = center(area, 74, 14);
-    frame.render_widget(Clear, modal);
-    let block = pane(app.text("歌曲详情", "Song details").into(), p, true);
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            name(item, "title"),
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(format!("{}  {}", app.text("歌手", "Artist"), artists(item))),
-        Line::from(format!(
-            "{}  {}",
-            app.text("专辑", "Album"),
-            name(&item["album"], "name")
-        )),
-        Line::from(format!(
-            "{}  {}",
-            app.text("格式", "Format"),
-            name(&item["audioSpec"], "format")
-        )),
-        Line::from(""),
-        Line::from(app.text(
-            "Enter 播放 · 空格 暂停/继续",
-            "Enter Play · Space Pause/Resume",
-        )),
-        Line::from(""),
-        Line::from(app.text(" Esc 返回", " Esc Back")),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(p.fg)),
-        inner,
-    );
-}
-
-#[cfg(test)]
-mod spectrum_tests {
-    use super::*;
-    #[test]
-    fn spectrum_styles_are_distinct_and_follow_palette_in_small_rectangles() {
-        use ratatui::{Terminal, backend::TestBackend};
-        let bands = std::array::from_fn(|i| 0.1 + i as f32 / 40.0);
-        let mut shapes = Vec::new();
-        for layout in 0..5 {
-            let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
-            terminal
-                .draw(|f| draw_spectrum(f, f.area(), &bands, layout, 0, palette(0)))
-                .unwrap();
-            let buffer = terminal.backend().buffer().clone();
-            assert!(!shapes.contains(&buffer));
-            shapes.push(buffer);
-            for theme in 0..5 {
-                for (w, h) in [(1, 1), (3, 2), (20, 4)] {
-                    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                    terminal
-                        .draw(|f| draw_spectrum(f, f.area(), &bands, layout, theme, palette(theme)))
-                        .unwrap();
-                    let buffer = terminal.backend().buffer();
-                    assert!(
-                        buffer
-                            .content
-                            .iter()
-                            .any(|c| c.fg == palette(theme).secondary
-                                || c.fg == palette(theme).accent)
-                    );
-                }
-            }
-        }
-    }
 }

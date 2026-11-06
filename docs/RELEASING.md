@@ -22,9 +22,9 @@
 3. 提交并推送分支，创建匹配版本的注释标签：
 
    ```sh
-   git tag -a v0.1.2 -m "Termune v0.1.2"
+   git tag -a v0.1.3 -m "Termune v0.1.3"
    git push origin master
-   git push origin v0.1.2
+   git push origin v0.1.3
    ```
 
 4. 打开 Actions 页面自行查看结果。六个平台及安装脚本测试全部成功后自动创建 Release，无需本地打包或提供 PAT。工作流使用自带 `GITHUB_TOKEN`，只有发布 job 有 `contents: write` 权限。
@@ -57,4 +57,4 @@ Linux / macOS 输出 `termune-<target>.tar.gz` 和无扩展名的 `termune-<targ
 
 CI 在 Linux / macOS 运行 Unix 安装 fixture，在 Windows x64 / ARM64 上分别用 PowerShell 5.1 和 PowerShell 7 运行安装 fixture，覆盖架构、校验失败保留旧程序、自定义路径、重复安装及 `irm | iex` 调用。所有 fixture 拦截下载，不接触真实用户安装或 NAS 凭据。
 
-实现依据：VLC 官方 [RC 模块](https://github.com/videolan/vlc-3.0/blob/master/modules/control/oldrc.c) 区分 Unix 的 `rc-fake-tty` / `rc-unix` 与 Windows 的 `rc-quiet`；Windows 自更新采用 [self-replace](https://docs.rs/self-replace/latest/self_replace/)。
+音频运行需要与程序架构一致的 LibVLC 3；Linux 编译依赖 `libasound2-dev`，DSP 方案和验证见 [音效研究](AUDIO_EFFECTS_RESEARCH.md)。Windows 自更新采用 [self-replace](https://docs.rs/self-replace/latest/self_replace/)。

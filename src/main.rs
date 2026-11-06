@@ -1,9 +1,10 @@
 mod app;
+mod audio;
 mod config;
+mod effects;
 mod media;
 mod player;
 mod queue;
-mod spectrum;
 mod ui;
 
 use std::{

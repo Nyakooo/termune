@@ -20,7 +20,9 @@ use std::{
 };
 use termune::{Result, Session, library::Page};
 
-pub const KINDS: [&str; 6] = ["track", "album", "artist", "playlist", "genre", "favorite"];
+pub const KINDS: [&str; 5] = ["album", "artist", "genre", "track", "favorite"];
+pub const TRACKS: usize = 3;
+pub const FAVORITES: usize = 4;
 
 #[cfg(test)]
 #[path = "app_tests.rs"]
@@ -131,7 +133,6 @@ pub enum Action {
     Previous,
     Next,
     Select,
-    Info,
     Settings,
     Help,
     Setting(usize),
@@ -145,6 +146,8 @@ pub enum Action {
     LyricsScroll(isize),
     Seek(f64),
     CycleMode,
+    CycleEffect,
+    Volume(i16),
     Favorite,
     ToggleMode,
     FollowLyrics,
@@ -164,12 +167,11 @@ pub struct App {
     pub username: String,
     pub route: String,
     pub section: usize,
-    pub views: [View; 6],
+    pub views: [View; 5],
     pub search_view: View,
     pub detail_view: View,
     pub query: Option<String>,
     pub detail: Option<Detail>,
-    pub info: Option<Value>,
     pub editing: bool,
     pub settings: Option<usize>,
     pub help: bool,
@@ -179,6 +181,7 @@ pub struct App {
     pub status: String,
     pub error: bool,
     pub hits: Vec<(Rect, Action)>,
+    last_click: Option<(u16, u16, Instant)>,
     pub tick: usize,
     pub allow_http: bool,
     pub player: Option<crate::player::Player>,
@@ -557,6 +560,10 @@ impl App {
         let latest = Arc::new(AtomicU64::new(0));
         let worker_latest = latest.clone();
         std::thread::spawn(move || worker(commands, replies, worker_latest));
+        let section = KINDS
+            .iter()
+            .position(|kind| *kind == config.last_category)
+            .unwrap_or(0);
         Self {
             fields: [config.fn_id.clone(), config.username.clone(), String::new()],
             remember: config.auto_login,
@@ -572,13 +579,12 @@ impl App {
             server: String::new(),
             username: String::new(),
             route: String::new(),
-            section: 0,
+            section,
             views: std::array::from_fn(|_| View::default()),
             search_view: View::default(),
             detail_view: View::default(),
             query: None,
             detail: None,
-            info: None,
             editing: false,
             settings: None,
             help: false,
@@ -588,6 +594,7 @@ impl App {
             error: !status.is_empty(),
             status,
             hits: Vec::new(),
+            last_click: None,
             tick: 0,
             allow_http,
             player: None,
@@ -732,7 +739,6 @@ impl App {
         self.views = std::array::from_fn(|_| View::default());
         self.query = None;
         self.detail = None;
-        self.info = None;
         self.editing = false;
         self.search_view = View::default();
         self.detail_view = View::default();
@@ -744,9 +750,6 @@ impl App {
         self.focus = 2;
     }
     fn replies(&mut self) {
-        if let Some(player) = &mut self.player {
-            player.visualize(self.config.professional);
-        }
         if let Some(result) = self.player.as_mut().and_then(|p| p.poll()) {
             self.player = None;
             match result {
@@ -880,8 +883,11 @@ impl App {
                             {
                                 item["isFavorite"] = Value::Bool(enabled);
                             }
-                            self.views[5].loaded = false;
-                            if self.section == 5 && self.detail.is_none() && self.query.is_none() {
+                            self.views[FAVORITES].loaded = false;
+                            if self.section == FAVORITES
+                                && self.detail.is_none()
+                                && self.query.is_none()
+                            {
                                 self.load(self.view().page.max(1));
                             } else {
                                 self.status = self
@@ -906,8 +912,14 @@ impl App {
                 Reply::Forgotten(Err(error)) => self.notice = Some(error),
                 Reply::Audio(id, title, result) if id == self.audio_generation => {
                     self.audio_loading = None;
-                    match result.and_then(|response| crate::player::Player::start(response, title))
-                    {
+                    match result.and_then(|response| {
+                        crate::player::Player::start(
+                            response,
+                            title,
+                            self.config.audio_effect,
+                            self.config.volume.min(100),
+                        )
+                    }) {
                         Ok(player) => {
                             self.player = Some(player);
                             self.error = false;
@@ -944,16 +956,18 @@ impl App {
         self.seek_drag = None;
     }
     fn play_selected(&mut self) {
-        if !matches!(self.section, 0 | 5) && self.query.is_none() && self.detail.is_none() {
+        if !matches!(self.section, TRACKS | FAVORITES)
+            && self.query.is_none()
+            && self.detail.is_none()
+        {
             return;
         }
-        let item = self.info.clone().or_else(|| {
-            self.view()
-                .table
-                .selected()
-                .and_then(|i| self.view().items.get(i))
-                .cloned()
-        });
+        let item = self
+            .view()
+            .table
+            .selected()
+            .and_then(|i| self.view().items.get(i))
+            .cloned();
         let Some(item) = item else {
             return;
         };
@@ -1059,7 +1073,9 @@ impl App {
     }
     fn favorite(&mut self) {
         if self.favorite_busy
-            || (!matches!(self.section, 0 | 5) && self.query.is_none() && self.detail.is_none())
+            || (!matches!(self.section, TRACKS | FAVORITES)
+                && self.query.is_none()
+                && self.detail.is_none())
         {
             return;
         }
@@ -1074,7 +1090,9 @@ impl App {
         let Some(guid) = item["guid"].as_str() else {
             return;
         };
-        let enabled = !item["isFavorite"].as_bool().unwrap_or(self.section == 5);
+        let enabled = !item["isFavorite"]
+            .as_bool()
+            .unwrap_or(self.section == FAVORITES);
         let guid = guid.to_owned();
         self.favorite_busy = true;
         let _ = self.tx.send(Command::Favorite {
@@ -1093,11 +1111,15 @@ impl App {
         }
     }
     fn switch(&mut self, section: usize) {
+        if section >= KINDS.len() {
+            return;
+        }
         self.cancel();
         self.section = section;
+        self.config.last_category = KINDS[section].into();
+        self.save();
         self.query = None;
         self.detail = None;
-        self.info = None;
         self.editing = false;
         if !self.view().loaded {
             self.load(1);
@@ -1110,7 +1132,10 @@ impl App {
         if self.busy {
             return;
         }
-        if matches!(self.section, 0 | 5) || self.query.is_some() || self.detail.is_some() {
+        if matches!(self.section, TRACKS | FAVORITES)
+            || self.query.is_some()
+            || self.detail.is_some()
+        {
             self.play_selected();
             return;
         }
@@ -1133,19 +1158,6 @@ impl App {
         });
         self.detail_view = View::default();
         self.load(1);
-    }
-    fn show_info(&mut self) {
-        if self.busy
-            || (!matches!(self.section, 0 | 5) && self.query.is_none() && self.detail.is_none())
-        {
-            return;
-        }
-        self.info = self
-            .view()
-            .table
-            .selected()
-            .and_then(|i| self.view().items.get(i))
-            .cloned();
     }
     fn page(&mut self, next: bool) {
         if self.busy {
@@ -1191,7 +1203,7 @@ impl App {
             return;
         };
         let track = playing
-            || matches!(self.section, 0 | 5)
+            || matches!(self.section, TRACKS | FAVORITES)
             || self.query.is_some()
             || self.detail.is_some();
         let key = format!(
@@ -1249,7 +1261,7 @@ impl App {
         match row {
             0 => self.config.theme = (self.config.theme as i8 + delta).rem_euclid(5) as usize,
             1 => {
-                self.config.layout = (self.config.layout as i8 + delta).rem_euclid(5) as usize;
+                self.config.layout = (self.config.layout as i8 + delta).rem_euclid(4) as usize;
                 self.config.professional = true;
             }
             2 => self.config.professional = !self.config.professional,
@@ -1262,6 +1274,26 @@ impl App {
     fn action(&mut self, action: Action) {
         match action {
             Action::Seek(fraction) => self.seek_drag = Some(fraction.clamp(0.0, 1.0)),
+            Action::Volume(delta) => {
+                let volume = (self.config.volume.min(100) as i16 + delta).clamp(0, 100) as u16;
+                if let Some(player) = self.player.as_mut()
+                    && let Err(error) = player.adjust_volume(volume as i16 - player.volume as i16)
+                {
+                    self.fail(error);
+                    return;
+                }
+                self.config.volume = volume;
+                self.status = format!("音量 / Volume: {volume}%");
+                self.save();
+            }
+            Action::CycleEffect => {
+                let effect = (self.config.audio_effect + 1) % crate::effects::Effect::COUNT;
+                if let Some(player) = self.player.as_mut() {
+                    player.set_effect(effect);
+                }
+                self.config.audio_effect = effect;
+                self.save();
+            }
             Action::CycleMode => {
                 self.config.playback_mode = self.config.playback_mode.next();
                 self.save();
@@ -1285,7 +1317,6 @@ impl App {
             Action::Previous => self.page(false),
             Action::Next => self.page(true),
             Action::Select => self.select(),
-            Action::Info => self.show_info(),
             Action::LyricsScroll(delta) => {
                 if delta != 0 {
                     self.lyrics_follow = false;
@@ -1299,14 +1330,12 @@ impl App {
                 self.seek_drag = None;
                 self.settings = Some(0);
                 self.help = false;
-                self.info = None;
                 self.editing = false;
             }
             Action::Help => {
                 self.seek_drag = None;
                 self.help = true;
                 self.settings = None;
-                self.info = None;
                 self.editing = false;
             }
             Action::Setting(row) => self.settings = Some(row),
@@ -1317,7 +1346,6 @@ impl App {
             Action::CloseModal => {
                 self.settings = None;
                 self.help = false;
-                self.info = None;
                 self.editing = false;
             }
             Action::Pause => self.toggle_audio(),
@@ -1347,9 +1375,7 @@ impl App {
         if self.seek_drag.take().is_some() {
             return;
         }
-        if self.info.take().is_some() {
-            return;
-        }
+
         if self.editing {
             self.editing = false;
             return;
@@ -1384,7 +1410,21 @@ impl App {
             self.action(Action::ToggleMode);
             return;
         }
-        if key.code == KeyCode::F(1) {
+        if self.connected
+            && !self.editing
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('+' | '=' | '-'))
+        {
+            self.action(Action::Volume(if key.code == KeyCode::Char('-') {
+                -5
+            } else {
+                5
+            }));
+            return;
+        }
+        if key.code == KeyCode::Char('?') && !self.editing && (self.connected || self.help) {
             if self.help {
                 self.help = false;
             } else {
@@ -1392,7 +1432,7 @@ impl App {
             }
             return;
         }
-        if key.code == KeyCode::F(2) {
+        if matches!(key.code, KeyCode::Char('p' | 'P')) && !self.editing && self.connected {
             if self.settings.is_some() {
                 self.settings = None;
             } else {
@@ -1410,10 +1450,14 @@ impl App {
             let count = if self.connected { 5 } else { 4 };
             match key.code {
                 KeyCode::Esc => self.settings = None,
-                KeyCode::Up | KeyCode::BackTab => self.settings = Some((row + count - 1) % count),
-                KeyCode::Down | KeyCode::Tab => self.settings = Some((row + 1) % count),
-                KeyCode::Left if row < 4 => self.adjust_setting(-1),
-                KeyCode::Right if row < 4 => self.adjust_setting(1),
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                    self.settings = Some((row + count - 1) % count)
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                    self.settings = Some((row + 1) % count)
+                }
+                KeyCode::Left | KeyCode::Char('h') if row < 4 => self.adjust_setting(-1),
+                KeyCode::Right | KeyCode::Char('l') if row < 4 => self.adjust_setting(1),
                 KeyCode::Enter if row == 4 && self.connected => self.action(Action::Disconnect),
                 KeyCode::Enter => self.adjust_setting(1),
                 _ => {}
@@ -1423,7 +1467,6 @@ impl App {
         if self.connected
             && self.config.professional
             && !self.editing
-            && self.info.is_none()
             && key.modifiers.contains(KeyModifiers::ALT)
         {
             if key.code == KeyCode::Up {
@@ -1436,7 +1479,7 @@ impl App {
             }
         }
         if self.connected && !self.editing && key.modifiers.contains(KeyModifiers::ALT) {
-            if let KeyCode::Char(c @ '1'..='6') = key.code {
+            if let KeyCode::Char(c @ '1'..='5') = key.code {
                 self.switch(c as usize - '1' as usize);
                 return;
             }
@@ -1525,7 +1568,7 @@ impl App {
                         return;
                     }
                     self.cancel();
-                    self.section = 0;
+                    self.section = TRACKS;
                     self.detail = None;
                     self.query = Some(query);
                     self.search_view = View::default();
@@ -1544,21 +1587,6 @@ impl App {
             }
             return;
         }
-        if self.info.is_some() {
-            if key.code == KeyCode::Enter {
-                self.play_selected();
-                self.info = None;
-                return;
-            }
-            if key.code == KeyCode::Char(' ') {
-                self.toggle_audio();
-                return;
-            }
-            if key.code == KeyCode::Esc {
-                self.info = None;
-            }
-            return;
-        }
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -1568,8 +1596,8 @@ impl App {
         match key.code {
             KeyCode::Char('q' | 'Q') => self.quit = true,
             KeyCode::Esc => self.back(),
-            KeyCode::Up => self.move_selection(-1),
-            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home => {
                 if !self.view().items.is_empty() {
                     self.view_mut().table.select(Some(0));
@@ -1581,14 +1609,14 @@ impl App {
                     self.view_mut().table.select(Some(len - 1));
                 }
             }
-            KeyCode::Left | KeyCode::PageUp => self.page(false),
-            KeyCode::Right | KeyCode::PageDown => self.page(true),
-            KeyCode::Tab => self.switch((self.section + 1) % 6),
-            KeyCode::BackTab => self.switch((self.section + 5) % 6),
-            KeyCode::Char(c @ '1'..='6') => self.switch(c as usize - '1' as usize),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::PageUp => self.page(false),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::PageDown => self.page(true),
+            KeyCode::Tab => self.switch((self.section + 1) % KINDS.len()),
+            KeyCode::BackTab => self.switch((self.section + KINDS.len() - 1) % KINDS.len()),
+            KeyCode::Char(c @ '1'..='5') => self.switch(c as usize - '1' as usize),
             KeyCode::Char('r' | 'R') => self.action(Action::Refresh),
             KeyCode::Char('/') => self.action(Action::Search),
-            KeyCode::Char('i' | 'I') => self.action(Action::Info),
+            KeyCode::Char('e' | 'E') => self.action(Action::CycleEffect),
             KeyCode::Char('o' | 'O') => self.action(Action::CycleMode),
             KeyCode::Char('f' | 'F') => self.action(Action::Favorite),
             KeyCode::Char(' ') => self.toggle_audio(),
@@ -1637,7 +1665,7 @@ impl App {
                     }
                 }
             }
-            Event::Mouse(mouse) if self.info.is_none() && !self.editing => match mouse.kind {
+            Event::Mouse(mouse) if !self.editing => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let action = self
                         .hits
@@ -1645,8 +1673,20 @@ impl App {
                         .rev()
                         .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
                         .map(|(_, a)| *a);
+                    let now = Instant::now();
+                    let double = self.last_click.take().is_some_and(|(x, y, time)| {
+                        x == mouse.column
+                            && y == mouse.row
+                            && now.duration_since(time) <= Duration::from_millis(400)
+                    });
+                    if !double {
+                        self.last_click = Some((mouse.column, mouse.row, now));
+                    }
                     if let Some(action) = action {
                         self.action(action);
+                        if double && matches!(action, Action::Row(_)) {
+                            self.action(Action::Select);
+                        }
                     }
                 }
                 MouseEventKind::ScrollDown

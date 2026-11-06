@@ -1,8 +1,10 @@
+![Termune — 让 NAS 音乐，在终端响起](docs/assets/termune-cover.png)
+
 # Termune
 
 用 Rust 构建的飞牛音乐终端客户端。输入 FN ID 和音乐独立账号，就能在终端里浏览、搜索和播放 NAS 中的音乐。
 
-目前为早期版本。支持 Windows、Linux、macOS，播放依赖 VLC；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
+目前为早期版本。支持 Windows、Linux、macOS，播放依赖 VLC 3；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
 
 ## 下载
 
@@ -22,7 +24,7 @@ Windows（PowerShell 5.1 或 PowerShell 7）：
 irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 ```
 
-自动识别系统与 x86_64 / ARM64，下载最新正式 Release，校验 SHA256 后安装。不需要 Rust、Python 或管理员权限；再次执行同一命令即可更新。脚本只安装 Termune，VLC 和可选 FFmpeg 请按下文准备。
+自动识别系统与 x86_64 / ARM64，下载最新正式 Release，校验 SHA256 后安装。不需要 Rust、Python 或管理员权限；再次执行同一命令即可更新。脚本只安装 Termune，VLC 请按下文准备。
 
 默认目录：Linux / macOS 为 `~/.local/bin/termune`，Windows 为 `%LOCALAPPDATA%\Termune\bin\termune.exe`。脚本会配置用户 PATH；安装后重新打开终端运行 `termune`，也可立即使用脚本输出的完整路径。配置和登录凭据保留。
 
@@ -51,13 +53,13 @@ irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 | Windows | x86_64 | [termune-x86_64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-pc-windows-msvc.zip) |
 | Windows | ARM64 | [termune-aarch64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-pc-windows-msvc.zip) |
 
-Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。Windows 使用 VLC 的本机 TCP 控制通道，默认识别 PATH 及 VideoLAN 常见安装目录；Windows 原生构建、播放和自更新仍需结合 Actions 与实际设备验证。
+Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。现在通过 LibVLC 3 解码，在 Termune 内完成音效和设备输出；Windows 原生构建、播放和自更新仍需结合 Actions 与实际设备验证。
 
 Windows 资源从 v0.1.1 起提供，需要对应发布工作流成功完成后才能下载。运行程序不需要 Rust 或 Python。
 
 ## 准备
 
-电脑安装 VLC。Linux 确认 `vlc` 在 PATH 中；macOS 和 Windows 也会尝试常见安装目录：
+电脑安装与 Termune 架构一致的 VLC 3。Linux 需安装包含 `libvlc.so.5` 的 VLC 包；macOS 和 Windows 会尝试常见安装目录：
 
 ```sh
 # Debian / Ubuntu
@@ -73,13 +75,10 @@ Windows 可使用 winget：
 
 ```powershell
 winget install --id VideoLAN.VLC -e
-# 可选：频谱解码
-winget install --id Gyan.FFmpeg -e
 ```
 
-安装后重新打开终端。Windows ARM64 可使用系统兼容运行的 VLC 版本；Termune 的 ARM64 程序不要求 VLC 与自身架构相同。
+安装后重新打开终端。VLC 3 与 Termune 必须具有相同架构（例如均为 x64）。Windows ARM64 若没有原生 ARM64 VLC 3，请使用 x64 Termune 和 x64 VLC；不支持在 ARM64 Termune 中加载 x64 VLC 库。
 
-频谱使用可选的 FFmpeg，Linux 可安装 `ffmpeg`，macOS 可运行 `brew install ffmpeg`。缺少 FFmpeg 不影响音乐播放。频谱会额外读取一份音频流，增加 NAS 网络流量；极简模式不进行频谱分析。
 
 NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创建**音乐独立账号**。FN ID 用于发现设备，不代替音乐账号认证。
 
@@ -95,7 +94,7 @@ termune
 
 建议终端至少 **36 × 20**，推荐 **100 × 30** 或更大，支持 UTF-8、真彩色和鼠标事件。输入时字母仍是文字，快捷键不会抢占密码或搜索内容。
 
-曲库支持全部歌曲、专辑、歌手、歌单、风格和收藏。Enter 打开分类详情或播放选中歌曲；播放队列保留开始播放时的来源，浏览其他分类不改变当前队列。列表按需分页，不会在启动时下载整个曲库。
+曲库按专辑、歌手、风格、全部歌曲、收藏排列；自动记住上次使用的分类。Enter 打开分类详情或播放选中歌曲；播放队列保留开始播放时的来源，浏览其他分类不改变当前队列。列表按需分页，不会在启动时下载整个曲库。
 
 ## 操作
 
@@ -103,22 +102,25 @@ termune
 | --- | --- | --- |
 | 选择条目 | 点击 / 滚轮 | ↑↓、Home / End |
 | 播放 / 打开专辑、歌手等 | 点击选中后 Enter | Enter |
-| 切换六类曲库 | 点击分类 | 1～6 / Alt+1～6、Tab / Shift+Tab |
+| 切换五类曲库 | 点击分类 | 1～5 / Alt+1～5、Tab / Shift+Tab |
 | 翻页 | 点击页码箭头 | ←→ / PageUp / PageDown |
 | 搜索 / 刷新 | — | /、R |
 | 暂停 / 继续 / 停止 | 播放器按钮 | 空格、S |
 | 上一首 / 下一首 | 播放器按钮 | [ / ] |
 | 跳转进度 | 点击或拖动进度条 | Alt+←→，每次 5 秒 |
 | 切换播放模式 | 点击播放器模式标签 | O |
+| 切换音效 | 点击音效标签 | E |
+| 调整音量 | 点击音量刻度两侧 | − / + / = |
 | 收藏 / 取消收藏 | — | F |
-| 查看详情 | — | I |
-| 极简 / 专业 | F2 设置 | M（非文字输入时全局可用） |
+| 极简 / 专业 | P 设置 | M（非文字输入时全局可用） |
 | 浏览歌词 | 歌词区滚轮 | Alt+↑↓，Alt+Home 恢复跟随 |
-| 帮助 / 设置 | 顶部按钮 | F1 / F2 |
+| 帮助 / 设置 | 顶部按钮 | ? / P |
 | 返回 / 取消 | 弹窗关闭按钮 | Esc |
 | 退出 | — | Q（曲库）/ Ctrl+C |
 
-设置中 ↑↓ 选择，←→ 修改，Enter 确认。播放模式在播放器内切换，支持顺序、列表循环、单曲循环和随机；单曲循环仅在自然结束时重复，手动切歌仍可跳过。完整键位见 F1。
+设置中 ↑↓ / j k 选择，←→ / h l 修改，Enter 确认。播放模式在播放器内切换，支持顺序、列表循环、单曲循环和随机；单曲循环仅在自然结束时重复，手动切歌仍可跳过。完整键位见 ?。
+
+音效在播放器中按 E 或点击切换：原声、耳机空间、醇厚低音、现场、Livehouse。切换在同一解码实例内渐变，不重启歌曲，不清空时间轴。耳机空间采用延迟低通交叉馈送与少量混响；现场使用较长扩散混响，Livehouse 使用较短混响与温暖低频。均含峰值保护，原声不叠加均衡或混响。它们不是酷狗蝰蛇、杜比或测量 HRTF 的复刻，也不需要 FFmpeg。开源方案与算法出处见 [音效研究](docs/AUDIO_EFFECTS_RESEARCH.md)。
 
 ## 命令行更新
 
@@ -134,15 +136,15 @@ termune update
 
 ## 界面
 
-F2 中分别选择布局、主题、语言和显示模式。M 随时切换极简 / 专业，保留布局偏好。专业模式显示歌词和频谱，极简保留曲库及基本播放控制。当前不展示封面。
+P 中分别选择布局、主题、语言和显示模式。M 随时切换极简 / 专业，保留布局偏好。专业模式显示歌词，极简保留曲库及基本播放控制。当前不展示封面。
 
-带时间戳的 LRC 歌词跟随 VLC 返回的实际位置，暂停停止、拖动后重新定位；纯文本歌词手动浏览。频谱基于实际解码音频，暂停停止分析，切歌和拖动后重建；独立解码与播放近似同步，不保证逐帧对齐。缺失歌词或频谱失败不会中断音乐。
+带时间戳的 LRC 歌词跟随 VLC 返回的实际位置，暂停停止、拖动后重新定位；纯文本歌词手动浏览。缺失歌词不会中断音乐。
 
 ## 自动登录与配置
 
 登录页勾选“下次自动登录”，成功后只将 Token 和身份信息保存到系统凭据存储，**不保存密码**。下次启动重新发现 NAS 并验证 `/user/me`；Token 有效则直接进入曲库，恢复期间不显示密码表单。
 
-不勾选则下次输入密码。F2 断开连接后可在登录页取消勾选，关闭自动登录并删除已保存凭据。断网、超时不会删除 Token；明确失效或身份不匹配才清理并要求重新登录。
+不勾选则下次输入密码。P 断开连接后可在登录页取消勾选，关闭自动登录并删除已保存凭据。断网、超时不会删除 Token；明确失效或身份不匹配才清理并要求重新登录。
 
 Linux 自动登录依赖桌面 Secret Service（GNOME Keyring 或支持 Secret Service 的 KWallet）及用户 D-Bus 会话；macOS 使用 Keychain，Windows 使用 Credential Manager。凭据存储不可用时，本次手动登录仍可使用，但不会启用自动登录。
 
@@ -177,13 +179,13 @@ termune --help          # 命令行帮助
 git clone https://github.com/Nyakooo/termune.git
 cd termune
 # Debian / Ubuntu 编译依赖
-sudo apt install pkg-config libdbus-1-dev
+sudo apt install pkg-config libdbus-1-dev libasound2-dev
 cargo build --release --locked
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-程序位于 `target/release/termune`。VLC 为播放运行依赖，FFmpeg 为可选频谱依赖，不随资源包分发。
+程序位于 `target/release/termune`。VLC 3（与程序架构一致）为播放运行依赖，不随资源包分发。
 
 ## 自动构建与发布
 

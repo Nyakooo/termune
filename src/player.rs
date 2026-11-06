@@ -1,335 +1,63 @@
-use std::{
-    process::{Child, Command, Stdio},
-    sync::mpsc,
-};
 use termune::Result;
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Timeline {
     pub position: f64,
     pub duration: f64,
 }
-enum Control {
-    Pause,
-    Seek(f64),
-}
 pub struct Player {
-    child: Child,
-    directory: std::path::PathBuf,
-    _bridge: termune::stream::Bridge,
-    controls: mpsc::Sender<Control>,
-    updates: mpsc::Receiver<Timeline>,
+    decoder: crate::audio::Decoder,
+    bridge: termune::stream::Bridge,
     pub title: String,
     pub paused: bool,
+    pub volume: u16,
     pub timeline: Timeline,
-    spectrum: Option<crate::spectrum::Spectrum>,
-    spectrum_source: termune::stream::AudioSource,
-    pub spectrum_unavailable: bool,
-    visualize: bool,
-    spectrum_resume_at: Option<(f64, std::time::Instant)>,
 }
 impl Player {
-    pub fn start(source: termune::stream::AudioSource, title: String) -> Result<Self> {
-        Self::start_with_transport(source, title, cfg!(windows))
-    }
-    fn start_with_transport(
+    pub fn start(
         source: termune::stream::AudioSource,
         title: String,
-        tcp: bool,
+        effect: usize,
+        volume: u16,
     ) -> Result<Self> {
-        let bridge = source.clone().bridge()?;
-        let directory = std::env::temp_dir().join(format!("termune-{}", termune::random_id()?));
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&directory)
-            .map_err(|_| "无法创建播放器控制目录")?;
-        let result = Self::launch(source, title, bridge, directory.clone(), tcp);
-        if result.is_err() {
-            let _ = std::fs::remove_dir_all(directory);
-        }
-        result
-    }
-    fn launch(
-        source: termune::stream::AudioSource,
-        title: String,
-        bridge: termune::stream::Bridge,
-        directory: std::path::PathBuf,
-        tcp: bool,
-    ) -> Result<Self> {
-        let mut command = Command::new(vlc_path());
-        command.args(["--intf", if cfg!(windows) { "rc" } else { "oldrc" }]);
-        #[cfg(unix)]
-        command.arg("--rc-fake-tty");
-        let endpoint = if tcp {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")
-                .map_err(|_| "无法选择本机播放器控制端口")?;
-            let address = listener
-                .local_addr()
-                .map_err(|_| "读取播放器控制端口失败")?;
-            command.arg("--rc-host").arg(address.to_string());
-            // VLC must bind this loopback port itself; no NAS credentials cross RC.
-            drop(listener);
-            Endpoint::Tcp(address)
-        } else {
-            #[cfg(unix)]
-            {
-                let socket = directory.join("control");
-                command.arg("--rc-unix").arg(&socket);
-                Endpoint::Unix(socket)
-            }
-            #[cfg(not(unix))]
-            return Err("当前平台需要 TCP 播放器控制通道".into());
-        };
-        command
-            .args([
-                "--no-video",
-                "--no-one-instance",
-                "--play-and-exit",
-                "--quiet",
-            ])
-            .arg(&bridge.url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.arg("--rc-quiet").creation_flags(0x08000000);
-        }
-        #[cfg(test)]
-        command.arg("--aout=dummy");
-        let child = command
-            .spawn()
-            .map_err(|_| "无法启动 VLC，请安装 VLC 或将 vlc 加入 PATH")?;
-        let (tx, rx) = mpsc::channel();
-        let (updates, samples) = mpsc::channel();
-        let marker = directory.clone();
-        std::thread::spawn(move || control_loop(endpoint, marker, rx, updates));
+        let bridge = source.bridge()?;
+        let decoder = crate::audio::Decoder::start(&bridge.url, effect, volume)?;
         Ok(Self {
-            child,
-            directory,
-            _bridge: bridge,
-            controls: tx,
-            updates: samples,
+            decoder,
+            bridge,
             title,
             paused: false,
+            volume,
             timeline: Timeline::default(),
-            spectrum: None,
-            spectrum_source: source,
-            spectrum_unavailable: false,
-            visualize: false,
-            spectrum_resume_at: None,
         })
     }
+    pub fn set_effect(&mut self, effect: usize) {
+        self.decoder.set_effect(effect);
+    }
+    pub fn adjust_volume(&mut self, delta: i16) -> Result<()> {
+        self.volume = (self.volume as i16 + delta).clamp(0, 100) as u16;
+        self.decoder.volume(self.volume);
+        Ok(())
+    }
     pub fn toggle(&mut self) -> Result<()> {
-        self.controls
-            .send(Control::Pause)
-            .map_err(|_| "播放器控制已断开")?;
         self.paused = !self.paused;
-        self.spectrum = None;
+        self.decoder.pause(self.paused);
         Ok(())
     }
     pub fn seek(&mut self, fraction: f64) -> Result<()> {
         if !fraction.is_finite() || self.timeline.duration <= 0.0 {
             return Err("尚未取得歌曲时长，暂不能拖动".into());
         }
-        self.spectrum = None;
-        self.spectrum_resume_at = Some((
-            fraction.clamp(0.0, 1.0) * self.timeline.duration,
-            std::time::Instant::now(),
-        ));
-        self.controls
-            .send(Control::Seek(
-                fraction.clamp(0.0, 1.0) * self.timeline.duration,
-            ))
-            .map_err(|_| "播放器控制已断开".into())
-    }
-    pub fn visualize(&mut self, enabled: bool) {
-        self.visualize = enabled;
-        if !enabled {
-            self.spectrum = None;
-        }
-    }
-    pub fn spectrum_frame(&mut self) -> Option<[f32; crate::spectrum::BANDS]> {
-        self.spectrum.as_mut().and_then(|s| s.frame())
+        self.decoder
+            .seek(fraction.clamp(0.0, 1.0) * self.timeline.duration);
+        Ok(())
     }
     pub fn poll(&mut self) -> Option<Result<()>> {
-        while let Ok(sample) = self.updates.try_recv() {
-            self.timeline = sample;
-        }
-        if self.spectrum.as_mut().is_some_and(|s| s.failed()) {
-            self.spectrum = None;
-            self.spectrum_unavailable = true;
-        }
-        if self.visualize
-            && !self.paused
-            && !self.spectrum_unavailable
-            && self.spectrum.is_none()
-            && self.timeline.duration > 0.0
-        {
-            self.spectrum = crate::spectrum::Spectrum::start(
-                self.spectrum_source.clone(),
-                self.spectrum_resume_at
-                    .take()
-                    .filter(|(_, time)| time.elapsed().as_secs_f32() < 1.0)
-                    .map(|(position, _)| position)
-                    .unwrap_or(self.timeline.position),
-            );
-            self.spectrum_unavailable = self.spectrum.is_none();
-        }
-        if let Ok(error) = self._bridge.errors.try_recv() {
+        let (position, duration) = self.decoder.time();
+        self.timeline = Timeline { position, duration };
+        if let Ok(error) = self.bridge.errors.try_recv() {
             return Some(Err(error));
         }
-        match self.child.try_wait() {
-            Ok(Some(status)) if status.success() => Some(Ok(())),
-            Ok(Some(_)) => Some(Err("播放器退出，请检查音频设备与资源".into())),
-            Err(_) => Some(Err("无法读取播放器状态".into())),
-            Ok(None) => None,
-        }
-    }
-}
-impl Drop for Player {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.directory);
-    }
-}
-fn vlc_path() -> std::path::PathBuf {
-    let name = if cfg!(windows) { "vlc.exe" } else { "vlc" };
-    if let Some(paths) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&paths) {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    #[cfg(windows)]
-    for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(directory) = std::env::var_os(key) {
-            let candidate = std::path::PathBuf::from(directory).join("VideoLAN/VLC/vlc.exe");
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let candidate = std::path::PathBuf::from("/Applications/VLC.app/Contents/MacOS/VLC");
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    name.into()
-}
-trait ControlIo: std::io::Read + std::io::Write {}
-impl<T: std::io::Read + std::io::Write> ControlIo for T {}
-enum Endpoint {
-    #[cfg(unix)]
-    Unix(std::path::PathBuf),
-    Tcp(std::net::SocketAddr),
-}
-impl Endpoint {
-    fn connect(&self) -> std::io::Result<Box<dyn ControlIo>> {
-        use std::time::Duration;
-        let timeout = Duration::from_millis(200);
-        match self {
-            #[cfg(unix)]
-            Self::Unix(path) => {
-                let socket = std::os::unix::net::UnixStream::connect(path)?;
-                socket.set_read_timeout(Some(timeout))?;
-                socket.set_write_timeout(Some(timeout))?;
-                Ok(Box::new(socket))
-            }
-            Self::Tcp(address) => {
-                let socket = std::net::TcpStream::connect_timeout(address, timeout)?;
-                socket.set_read_timeout(Some(timeout))?;
-                socket.set_write_timeout(Some(timeout))?;
-                Ok(Box::new(socket))
-            }
-        }
-    }
-}
-fn control_loop(
-    endpoint: Endpoint,
-    directory: std::path::PathBuf,
-    rx: mpsc::Receiver<Control>,
-    tx: mpsc::Sender<Timeline>,
-) {
-    use std::{
-        io::{BufRead, BufReader, Write},
-        time::Duration,
-    };
-    // All IPC runs here; drawing and dragging never wait on the VLC socket.
-    loop {
-        if !directory.exists() {
-            return;
-        }
-        let socket = match endpoint.connect() {
-            Ok(s) => s,
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        };
-        let mut reader = BufReader::new(socket);
-        loop {
-            if !directory.exists() {
-                return;
-            }
-            while let Ok(command) = rx.try_recv() {
-                let text = match command {
-                    Control::Pause => "pause\n".into(),
-                    Control::Seek(seconds) => format!("seek {}\n", seconds.round() as u64),
-                };
-                if reader.get_mut().write_all(text.as_bytes()).is_err() {
-                    return;
-                }
-            }
-            if reader
-                .get_mut()
-                .write_all(b"get_time\nget_length\n")
-                .is_err()
-            {
-                break;
-            }
-            let mut values = Vec::new();
-            for _ in 0..16 {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if let Ok(value) = line.trim().trim_start_matches('>').trim().parse::<f64>()
-                            && value.is_finite()
-                            && value >= 0.0
-                        {
-                            values.push(value);
-                            if values.len() == 2 {
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if values.len() == 2
-                && tx
-                    .send(Timeline {
-                        position: values[0],
-                        duration: values[1],
-                    })
-                    .is_err()
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        self.decoder.finished()
     }
 }
 #[cfg(all(test, unix))]
@@ -338,14 +66,9 @@ mod tests {
     #[test]
     #[ignore = "requires local VLC; uses synthetic WAV and fake NAS, never real credentials"]
     fn real_vlc_bridge_reports_position_pause_seek_and_eof() {
-        exercise(false);
+        exercise();
     }
-    #[test]
-    #[ignore = "requires local VLC; exercises the Windows TCP transport on a fake NAS"]
-    fn real_vlc_tcp_reports_position_pause_seek_and_eof() {
-        exercise(true);
-    }
-    fn exercise(tcp: bool) {
+    fn exercise() {
         use std::{
             io::{Read, Write},
             net::TcpListener,
@@ -492,16 +215,16 @@ mod tests {
             "device",
         )
         .unwrap();
-        let mut player = Player::start_with_transport(
+        let mut player = Player::start(
             termune::stream::AudioSource {
                 session,
                 guid: "test-track".into(),
             },
             "synthetic WAV".into(),
-            tcp,
+            0,
+            100,
         )
         .unwrap();
-        player.visualize(true);
         let started = Instant::now();
         while player.timeline.duration < 19.0 {
             assert!(
@@ -511,28 +234,18 @@ mod tests {
             assert!(player.poll().is_none());
             std::thread::sleep(Duration::from_millis(80));
         }
-        let ffmpeg_available = Command::new("ffmpeg").arg("-version").output().is_ok();
-        if ffmpeg_available {
-            let started = Instant::now();
-            loop {
-                assert!(player.poll().is_none());
-                if let Some(frame) = player.spectrum_frame() {
-                    assert!(frame.iter().copied().fold(0.0f32, f32::max) > 0.8);
-                    break;
-                }
-                assert!(!player.spectrum_unavailable, "FFmpeg decoder failed");
-                assert!(
-                    started.elapsed() < Duration::from_secs(10),
-                    "No decoded spectrum"
-                );
-                std::thread::sleep(Duration::from_millis(80));
-            }
-        } else {
-            assert!(player.spectrum_unavailable);
+        let before = player.timeline.position;
+        let handle = player.decoder.player_id_for_test();
+        let rendered = player.decoder.rendered_for_test();
+        for effect in 0..crate::effects::Effect::COUNT {
+            player.set_effect(effect);
+            assert_eq!(player.decoder.player_id_for_test(), handle);
+            assert!(player.timeline.duration > 19.0);
+            std::thread::sleep(Duration::from_millis(80));
+            assert!(player.poll().is_none());
+            assert!(player.timeline.position >= before);
         }
-        player.visualize(false);
-        assert!(player.spectrum.is_none());
-        player.visualize(true);
+        assert!(player.decoder.rendered_for_test() > rendered);
         player.seek(0.6).unwrap();
         let started = Instant::now();
         while !(11.0..=14.0).contains(&player.timeline.position)
@@ -549,34 +262,7 @@ mod tests {
             ranges.load(Ordering::Relaxed) > 0,
             "VLC seek must reach NAS as Range"
         );
-        if ffmpeg_available {
-            let started = Instant::now();
-            loop {
-                assert!(player.poll().is_none());
-                if let Some(frame) = player.spectrum_frame() {
-                    let peak = frame
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.total_cmp(b.1))
-                        .unwrap()
-                        .0;
-                    // The first half is 125 Hz; after seeking to 12s it must be 1000 Hz.
-                    let expected = ((1000.0f32 / 30.0).ln() / (8000.0f32 / 30.0).ln()
-                        * crate::spectrum::BANDS as f32)
-                        as usize;
-                    assert_eq!(peak, expected);
-                    break;
-                }
-                assert!(
-                    started.elapsed() < Duration::from_secs(4),
-                    "No spectrum after seek"
-                );
-                std::thread::sleep(Duration::from_millis(80));
-            }
-        }
-
         player.toggle().unwrap();
-        assert!(player.spectrum_frame().is_none());
         std::thread::sleep(Duration::from_millis(500));
         player.poll();
         let paused = player.timeline.position;

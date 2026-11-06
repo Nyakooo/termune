@@ -32,4 +32,4 @@
 TERMUNE_UI_CAPTURE_DIR=/tmp/termune-ui cargo test --bin termune export_ui_previews -- --ignored
 ```
 
-真实使用仍需检查终端字体、True Color、NAS 歌词内容与图片格式。当前已接入真实 VLC 进度、LRC 跟随与队列自动切歌；频谱已通过独立 FFmpeg 解码接入，原生音频引擎仍未实现，新增接口与播放行为待真实 NAS 验证。
+真实使用仍需检查终端字体、True Color、NAS 歌词内容与图片格式。当前已接入真实 VLC 进度、LRC 跟随与队列自动切歌；原生音频引擎仍未实现，新增接口与播放行为待真实 NAS 验证。

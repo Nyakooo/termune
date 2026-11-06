@@ -9,8 +9,13 @@ pub struct Config {
     pub english: bool,
     pub theme: usize,
     pub layout: usize,
+    #[serde(default)]
+    pub layout_version: u8,
     pub professional: bool,
     pub auto_login: bool,
+    pub volume: u16,
+    pub audio_effect: usize,
+    pub last_category: String,
     pub playback_mode: crate::queue::Mode,
     #[serde(skip)]
     pub path_override: Option<std::path::PathBuf>,
@@ -24,8 +29,12 @@ impl Default for Config {
             english: false,
             theme: 0,
             layout: 0,
+            layout_version: 1,
             professional: true,
             auto_login: false,
+            volume: 100,
+            audio_effect: 0,
+            last_category: "album".into(),
             playback_mode: crate::queue::Mode::default(),
             path_override: None,
         }
@@ -49,8 +58,16 @@ impl Config {
             Err(_) => return Err("读取 config.toml 失败".into()),
         };
         let mut config: Self = toml::from_str(&text).map_err(|_| "config.toml 格式错误")?;
+        config.audio_effect = crate::effects::Effect::from_index(config.audio_effect) as usize;
         config.theme %= 5;
-        config.layout %= 5;
+        if config.layout_version == 0 {
+            config.layout = match config.layout {
+                0 | 1 => 0,
+                n => n.saturating_sub(1).min(3),
+            };
+        }
+        config.layout %= 4;
+        config.layout_version = 1;
         Ok(config)
     }
     pub fn save(&self) -> Result<()> {

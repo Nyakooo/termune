@@ -8,6 +8,7 @@ fn app() -> App {
             "termune-test-{}.toml",
             termune::random_id().unwrap()
         ))),
+        last_category: "track".into(),
         ..Default::default()
     };
     App::with_config(config, String::new(), false)
@@ -26,7 +27,7 @@ fn export_ui_previews() {
     app.username = "preview".into();
     app.route = "HTTPS · FN Connect".into();
     app.config.professional = true;
-    app.views[0]=View{items:(0..12).map(|i|json!({"guid":format!("fixture-{i}"),"title":(["他的睫毛","晴天","七里香","夜曲","一路向北","稻香"][i%6]),"artists":[{"name":"周杰伦"}],"album":{"name":"叶惠美"},"audioSpec":{"format":"FLAC"}})).collect(),total:440,page:1,loaded:true,table:TableState::default().with_selected(1)};
+    app.views[3]=View{items:(0..12).map(|i|json!({"guid":format!("fixture-{i}"),"title":(["他的睫毛","晴天","七里香","夜曲","一路向北","稻香"][i%6]),"artists":[{"name":"周杰伦"}],"album":{"name":"叶惠美"},"audioSpec":{"format":"FLAC"}})).collect(),total:440,page:1,loaded:true,table:TableState::default().with_selected(1)};
     app.status = "布局预览 · 测试数据".into();
     app.media = crate::media::Media {
         key: "fixture".into(),
@@ -41,7 +42,7 @@ fn export_ui_previews() {
         ..Default::default()
     };
     for theme in 0..5 {
-        for layout in 0..5 {
+        for layout in 0..4 {
             app.config.theme = theme;
             app.config.layout = layout;
             let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -86,11 +87,11 @@ fn playback_shortcuts_select_tracks_and_cancel_pending_audio() {
     let (tx, commands) = mpsc::channel();
     app.tx = tx;
     app.connected = true;
-    app.views[0].items = vec![
+    app.views[3].items = vec![
         json!({"guid":"first","title":"First"}),
         json!({"guid":"second","title":"Second"}),
     ];
-    app.views[0].table.select(Some(0));
+    app.views[3].table.select(Some(0));
     key(&mut app, KeyCode::Enter);
     match commands.try_recv().unwrap() {
         Command::Play { id, guid, .. } => {
@@ -100,9 +101,8 @@ fn playback_shortcuts_select_tracks_and_cancel_pending_audio() {
         _ => panic!("expected play request"),
     }
     key(&mut app, KeyCode::Char('i'));
-    assert_eq!(app.info.as_ref().unwrap()["guid"], "first");
+    assert!(commands.try_recv().is_err());
     key(&mut app, KeyCode::Enter);
-    assert!(app.info.is_none());
     assert!(matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "first"));
     key(&mut app, KeyCode::Char(']'));
     match commands.try_recv().unwrap() {
@@ -142,7 +142,7 @@ fn login_shortcut_letters_remain_typable_and_small_form_is_usable() {
     }
     assert_eq!(app.fields[0], "gtmld");
     let screen = render(&mut app, 36, 20);
-    assert!(screen.contains("F1"));
+    assert!(screen.contains("?"));
     assert!(screen.contains("下次自动登录"));
     assert!(screen.contains("连接飞牛音乐"));
     assert_eq!(
@@ -170,7 +170,7 @@ fn settings_and_help_are_scoped_and_do_not_change_layout_on_open() {
     app.connected = true;
     app.config.professional = false;
     app.config.layout = 2;
-    key(&mut app, KeyCode::F(2));
+    key(&mut app, KeyCode::Char('p'));
     assert_eq!(app.settings, Some(0));
     assert!(!app.config.professional);
     assert_eq!(app.config.layout, 2);
@@ -184,7 +184,7 @@ fn settings_and_help_are_scoped_and_do_not_change_layout_on_open() {
     )));
     key(&mut app, KeyCode::Esc);
     assert!(app.settings.is_none());
-    key(&mut app, KeyCode::F(1));
+    key(&mut app, KeyCode::Char('?'));
     assert!(app.help);
     assert!(render(&mut app, 100, 30).contains("快捷键"));
     key(&mut app, KeyCode::Esc);
@@ -198,7 +198,7 @@ fn library_render_supports_empty_unicode_pagination_and_modal() {
     app.server = "测试 NAS".into();
     app.username = "tester".into();
     let item = json!({"guid":"one","title":"他的睫毛 🎵","artists":[{"name":"周杰伦"}],"album":{"name":"叶惠美"},"audioSpec":{"format":"FLAC"}});
-    app.views[0] = View {
+    app.views[3] = View {
         items: vec![item],
         total: 440,
         page: 1,
@@ -210,11 +210,10 @@ fn library_render_supports_empty_unicode_pagination_and_modal() {
     assert!(text.contains("周杰伦"));
     assert!(text.contains("440"));
     key(&mut app, KeyCode::Char('i'));
-    assert!(render(&mut app, 100, 32).contains("FLAC"));
+    assert!(!render(&mut app, 100, 32).contains("歌曲详情"));
     key(&mut app, KeyCode::Esc);
-    assert!(app.info.is_none());
-    app.section = 3;
-    app.views[3].loaded = true;
+    app.section = 2;
+    app.views[2].loaded = true;
     assert!(render(&mut app, 80, 24).contains("这里还没有音乐数据"));
     app.config.english = true;
     assert!(render(&mut app, 80, 24).contains("No music here yet"));
@@ -229,9 +228,9 @@ fn full_layouts_are_distinct_and_minimal_mode_preserves_layout() {
     let mut app = app();
     app.connected = true;
     app.config.professional = true;
-    app.views[0].items = vec![json!({"guid":"one","title":"Test song"})];
-    app.views[0].table.select(Some(0));
-    let markers = ["AIRWAVE", "NIGHT RECEIVER", "OPERATIONS", "TRACKER", "BTOP"];
+    app.views[3].items = vec![json!({"guid":"one","title":"Test song"})];
+    app.views[3].table.select(Some(0));
+    let markers = ["AIRWAVE", "OPERATIONS", "TRACKER", "BTOP"];
     for (layout, marker) in markers.into_iter().enumerate() {
         app.config.layout = layout;
         let screen = render(&mut app, 100, 30);
@@ -253,7 +252,7 @@ fn full_layouts_are_distinct_and_minimal_mode_preserves_layout() {
     let minimal = render(&mut app, 100, 30);
     assert!(!markers.iter().any(|marker| minimal.contains(marker)));
     assert!(minimal.contains("Test song"));
-    assert_eq!(app.config.layout, 4);
+    assert_eq!(app.config.layout, 3);
     app.config.professional = true;
     assert!(render(&mut app, 100, 30).contains("BTOP"));
 }
@@ -262,7 +261,7 @@ fn full_layouts_are_distinct_and_minimal_mode_preserves_layout() {
 fn stale_response_is_discarded_and_failed_search_preserves_library() {
     let mut app = app();
     app.connected = true;
-    app.views[0] = View {
+    app.views[3] = View {
         items: vec![json!({"guid":"kept","title":"library song"})],
         total: 1,
         page: 1,
@@ -275,7 +274,7 @@ fn stale_response_is_discarded_and_failed_search_preserves_library() {
     app.busy = true;
     let load = Load {
         id: 9,
-        section: 0,
+        section: 3,
         page: 2,
         query: None,
         detail: None,
@@ -289,13 +288,13 @@ fn stale_response_is_discarded_and_failed_search_preserves_library() {
     ))
     .unwrap();
     app.replies();
-    assert_eq!(app.views[0].items[0]["guid"], "kept");
+    assert_eq!(app.views[3].items[0]["guid"], "kept");
     assert!(app.busy);
     app.query = Some("搜索".into());
     tx.send(Reply::Page(
         Load {
             id: 10,
-            section: 0,
+            section: 3,
             page: 1,
             query: Some("搜索".into()),
             detail: None,
@@ -306,7 +305,7 @@ fn stale_response_is_discarded_and_failed_search_preserves_library() {
     app.replies();
     assert!(app.error);
     assert!(!app.busy);
-    assert_eq!(app.views[0].items[0]["guid"], "kept");
+    assert_eq!(app.views[3].items[0]["guid"], "kept");
     key(&mut app, KeyCode::Esc);
     assert!(app.query.is_none());
     assert_eq!(app.view().items.len(), 1);
@@ -346,8 +345,8 @@ fn entering_album_and_back_restores_parent_selection() {
     let (tx, rx) = mpsc::channel();
     app.tx = tx;
     app.connected = true;
-    app.section = 1;
-    app.views[1] = View {
+    app.section = 0;
+    app.views[0] = View {
         items: vec![json!({"guid":"album-id","name":"专辑"})],
         total: 1,
         page: 3,
@@ -453,7 +452,7 @@ fn lyrics_only_appear_in_professional_mode_and_stale_session_media_is_ignored() 
     let mut app = app();
     app.connected = true;
     app.media.lyrics = vec!["可辨识的测试歌词".into(); 12];
-    for layout in 0..5 {
+    for layout in 0..4 {
         app.config.layout = layout;
         assert!(render(&mut app, 120, 36).contains("可辨识的测试歌词"));
         render(&mut app, 36, 20);
@@ -493,16 +492,14 @@ fn global_m_category_shortcuts_and_dragging_have_correct_scope() {
     let initial = app.config.professional;
     key(&mut app, KeyCode::Char('m'));
     assert_eq!(app.config.professional, !initial);
-    app.info = Some(json!({"title":"test"}));
     key(&mut app, KeyCode::Char('M'));
     assert_eq!(app.config.professional, initial);
-    app.info = None;
     app.editing = true;
     key(&mut app, KeyCode::Char('m'));
     assert_eq!(app.search_input, "m");
     assert_eq!(app.config.professional, initial);
     app.editing = false;
-    for (index, character) in ('1'..='6').enumerate() {
+    for (index, character) in ('1'..='5').enumerate() {
         app.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT));
         assert_eq!(app.section, index);
     }
@@ -538,7 +535,7 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
     app.connected = true;
     let (tx, commands) = mpsc::channel();
     app.tx = tx;
-    app.views[0] = View {
+    app.views[3] = View {
         items: (0..50)
             .map(|i| json!({"guid":format!("song-{i}"),"title":"test"}))
             .collect(),
@@ -549,17 +546,17 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
     };
     app.play_selected();
     assert!(matches!(commands.recv().unwrap(), Command::Play { .. }));
-    app.section = 2;
+    app.section = 1;
     app.advance(true, true);
     match commands.recv().unwrap() {
         Command::Advance { context, .. } => {
-            assert_eq!(context.section, 0);
+            assert_eq!(context.section, TRACKS);
             assert_eq!(context.index, 50);
         }
         _ => panic!("expected cross-page queue request"),
     }
     app.playing_context = Some(PlaybackContext {
-        section: 0,
+        section: 3,
         query: None,
         detail: None,
         index: 49,
@@ -579,8 +576,8 @@ fn favorites_require_unmodified_key_and_update_only_after_server_confirmation() 
     app.tx = tx;
     let (events, rx) = mpsc::channel();
     app.rx = rx;
-    app.views[0].items = vec![json!({"guid":"song","title":"Test","isFavorite":false})];
-    app.views[0].table.select(Some(0));
+    app.views[3].items = vec![json!({"guid":"song","title":"Test","isFavorite":false})];
+    app.views[3].table.select(Some(0));
     app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
     assert!(commands.try_recv().is_err());
     key(&mut app, KeyCode::Char('f'));
@@ -591,7 +588,7 @@ fn favorites_require_unmodified_key_and_update_only_after_server_confirmation() 
         }
         _ => panic!("favorite request missing"),
     };
-    assert_eq!(app.views[0].items[0]["isFavorite"], false);
+    assert_eq!(app.views[3].items[0]["isFavorite"], false);
     events
         .send(Reply::Favorite(
             app.media_epoch,
@@ -601,7 +598,7 @@ fn favorites_require_unmodified_key_and_update_only_after_server_confirmation() 
         ))
         .unwrap();
     app.replies();
-    assert_eq!(app.views[0].items[0]["isFavorite"], true);
+    assert_eq!(app.views[3].items[0]["isFavorite"], true);
 }
 
 #[test]
@@ -612,14 +609,14 @@ fn shuffle_previous_uses_actual_history() {
     app.tx = tx;
     app.config.playback_mode = crate::queue::Mode::Shuffle;
     app.playing_context = Some(PlaybackContext {
-        section: 0,
+        section: 3,
         query: None,
         detail: None,
         index: 3,
         total: 6,
     });
     app.shuffle_history.push(PlaybackContext {
-        section: 0,
+        section: 3,
         query: None,
         detail: None,
         index: 1,
@@ -666,4 +663,85 @@ fn restored_session_enters_library_directly_and_escape_cancels_restore() {
     assert!(!app.restoring);
     assert!(!app.busy);
     assert!(render(&mut app, 100, 32).contains("音乐密码"));
+}
+
+#[test]
+fn volume_keys_work_in_settings_and_match_mouse_actions() {
+    let mut app = app();
+    app.connected = true;
+    app.settings = Some(0);
+    key(&mut app, KeyCode::Char('-'));
+    assert_eq!(app.config.volume, 95);
+    app.key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::SHIFT));
+    assert_eq!(app.config.volume, 100);
+    app.action(Action::Volume(-5));
+    assert_eq!(app.config.volume, 95);
+    app.settings = None;
+    app.editing = true;
+    key(&mut app, KeyCode::Char('-'));
+    assert_eq!(app.config.volume, 95);
+    assert_eq!(app.search_input, "-");
+}
+
+#[test]
+fn settings_support_hjkl_and_preserve_text_input() {
+    let mut app = app();
+    app.connected = true;
+    key(&mut app, KeyCode::Char('p'));
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.settings, Some(1));
+    key(&mut app, KeyCode::Char('l'));
+    assert_eq!(app.config.layout, 1);
+    key(&mut app, KeyCode::Char('h'));
+    assert_eq!(app.config.layout, 0);
+    key(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.settings, Some(0));
+    key(&mut app, KeyCode::Esc);
+    app.editing = true;
+    key(&mut app, KeyCode::Char('p'));
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.search_input, "p?");
+    assert!(app.settings.is_none());
+    assert!(!app.help);
+}
+
+#[test]
+fn library_tabs_have_natural_width_and_remember_category() {
+    let mut app = app();
+    app.connected = true;
+    app.views.iter_mut().for_each(|v| v.loaded = true);
+    assert_eq!(KINDS, ["album", "artist", "genre", "track", "favorite"]);
+    key(&mut app, KeyCode::Char('2'));
+    assert_eq!(app.section, 1);
+    let saved = std::fs::read_to_string(app.config.path_override.as_ref().unwrap()).unwrap();
+    let config: Config = toml::from_str(&saved).unwrap();
+    let restored = App::with_config(config, String::new(), false);
+    assert_eq!(restored.section, 1);
+    let text = render(&mut app, 120, 36);
+    assert!(!text.contains("歌单"));
+    let tabs: Vec<_> = app
+        .hits
+        .iter()
+        .filter(|(_, action)| matches!(action, Action::Section(_)))
+        .collect();
+    assert_eq!(tabs.len(), 5);
+    assert!(tabs[0].0.width < tabs[3].0.width);
+    assert_eq!(tabs[1].0.x - tabs[0].0.right(), 2);
+    key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.section, 0);
+    key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.section, FAVORITES);
+}
+
+#[test]
+fn effect_shortcut_cycles_five_presets_and_saves_selection() {
+    let mut app = app();
+    app.connected = true;
+    for index in 1..=crate::effects::Effect::COUNT {
+        key(&mut app, KeyCode::Char('e'));
+        assert_eq!(
+            app.config.audio_effect,
+            index % crate::effects::Effect::COUNT
+        );
+    }
 }
