@@ -1,4 +1,4 @@
-![Termune — 让 NAS 音乐，在终端响起](docs/assets/termune-cover.png)
+![Termune — 让 NAS 音乐，在终端响起](docs/assets/termune-cover.svg)
 
 # Termune
 
