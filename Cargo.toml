@@ -1,8 +1,9 @@
 [package]
 name = "termune"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Terminal library browser for Feiniu Music"
+license = "MIT"
 repository = "https://github.com/Nyakooo/termune"
 
 [dependencies]

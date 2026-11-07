@@ -58,7 +58,7 @@ def package(target, root=ROOT):
     binary.chmod(0o755)
     prefix = f"termune-v{value}-{target}"
     files = [(binary, executable_name)]
-    files += [(root / name, name) for name in ("README.md", "RELEASE_NOTES.md", "install.sh", "install.ps1")]
+    files += [(root / name, name) for name in ("LICENSE", "README.md", "RELEASE_NOTES.md", "install.sh", "install.ps1")]
     files += [(path, f"docs/{path.name}") for path in sorted((root / "docs").glob("*.md"))]
     if target.endswith("windows-msvc"):
         with zipfile.ZipFile(dist / archive_name, "w", compression=zipfile.ZIP_DEFLATED) as archive:

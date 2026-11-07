@@ -38,7 +38,7 @@ class ReleaseContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = self.fixture(d)
             (root / "docs").mkdir()
-            for name in ("README.md", "RELEASE_NOTES.md", "install.sh", "install.ps1"):
+            for name in ("LICENSE", "README.md", "RELEASE_NOTES.md", "install.sh", "install.ps1"):
                 (root / name).write_text("fixture")
             for target in module.TARGETS:
                 filename = "termune.exe" if "windows" in target else "termune"
@@ -49,13 +49,16 @@ class ReleaseContract(unittest.TestCase):
                 binary, archive = module.asset_names(target)
                 self.assertEqual((root / "dist" / binary).read_bytes(), b"executable fixture")
                 member = f"termune-v0.1.0-{target}/{filename}"
+                license_member = f"termune-v0.1.0-{target}/LICENSE"
                 if "windows" in target:
                     with zipfile.ZipFile(root / "dist" / archive) as package:
                         self.assertEqual(package.read(member), b"executable fixture")
+                        self.assertEqual(package.read(license_member), b"fixture")
                         self.assertFalse(any("README.en" in n or n.endswith(".png") for n in package.namelist()))
                 else:
                     with tarfile.open(root / "dist" / archive) as package:
                         self.assertEqual(package.extractfile(member).read(), b"executable fixture")
+                        self.assertEqual(package.extractfile(license_member).read(), b"fixture")
                         self.assertTrue(package.getmember(member).mode & 0o111)
 
     def test_incomplete_release_cannot_be_published(self):
