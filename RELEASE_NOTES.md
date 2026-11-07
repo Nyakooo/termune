@@ -1,3 +1,11 @@
+# Termune v0.1.7
+
+- Windows、macOS 和 Linux 发布版内置音频解码器，安装或更新后可直接播放。常见格式包括 MP3、FLAC、WAV、M4A（AAC-LC / ALAC）、Ogg Vorbis 和 Opus。
+- 保留已有音效预设、渐变、音量、登录和配置。播放进度按实际送往设备的 PCM 帧推进，继续支持 NAS 流式播放、Range 拖动和歌词同步。
+- 内置解码器的源码和许可见 [音频组件许可](https://github.com/Nyakooo/termune/blob/v0.1.7/docs/AUDIO_LICENSES.md)。
+
+---
+
 # Termune v0.1.6
 
 - 原有 ←→ / h l 翻页逻辑保持不变；新增 Ctrl+←→ / Ctrl+h l 快退、快进 5 秒，保留 Alt+←→。

@@ -97,7 +97,6 @@ main() {
             printf 'Run now: %s/termune\n' "$directory"
             ;;
     esac
-    printf 'Playback requires VLC. Your NAS credentials are not changed.\n'
 }
 # Execute only after the complete function definition has been received.
 main "$@"

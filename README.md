@@ -4,7 +4,7 @@
 
 用 Rust 构建的飞牛音乐终端客户端。输入 FN ID 和音乐独立账号，就能在终端里浏览、搜索和播放 NAS 中的音乐。
 
-目前为早期版本。支持 Windows、Linux、macOS，播放依赖 VLC 3；Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
+目前为早期版本。支持 Windows、Linux、macOS，v0.1.7 起内置音频解码器。Termune 是非官方客户端，与飞牛官方没有隶属或背书关系。
 
 ## 下载
 
@@ -24,7 +24,7 @@ Windows（PowerShell 5.1 或 PowerShell 7）：
 irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 ```
 
-自动识别系统与 x86_64 / ARM64，下载最新正式 Release，校验 SHA256 后安装。不需要 Rust、Python 或管理员权限；再次执行同一命令即可更新。脚本只安装 Termune，VLC 请按下文准备。
+自动识别系统与 x86_64 / ARM64，下载最新正式 Release，校验 SHA256 后安装。不需要 Rust、Python 或管理员权限；再次执行同一命令即可更新。Windows、macOS 和 Linux 的 v0.1.7 起发布版安装完成即可播放。
 
 默认目录：Linux / macOS 为 `~/.local/bin/termune`，Windows 为 `%LOCALAPPDATA%\Termune\bin\termune.exe`。脚本会配置用户 PATH；安装后重新打开终端运行 `termune`，也可立即使用脚本输出的完整路径。配置和登录凭据保留。
 
@@ -53,32 +53,13 @@ irm https://raw.githubusercontent.com/Nyakooo/termune/master/install.ps1 | iex
 | Windows | x86_64 | [termune-x86_64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-x86_64-pc-windows-msvc.zip) |
 | Windows | ARM64 | [termune-aarch64-pc-windows-msvc.zip](https://github.com/Nyakooo/termune/releases/latest/download/termune-aarch64-pc-windows-msvc.zip) |
 
-Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。现在通过 LibVLC 3 解码，在 Termune 内完成音效和设备输出；Windows 原生构建、播放和自更新仍需结合 Actions 与实际设备验证。
+Linux 使用 GNU libc，以 Ubuntu 22.04 为构建基线，不提供 Alpine/musl 二进制。macOS 使用 macOS 15 原生构建，尚未验证旧系统兼容性。当前主机验证 Linux x86_64，其他平台由 Actions 构建和测试，仍需实际设备验证。Linux 通过系统 ALSA 音频栈输出，极简系统需具备 ALSA 运行库和音频设备。
 
 Windows 资源从 v0.1.1 起提供，需要对应发布工作流成功完成后才能下载。运行程序不需要 Rust 或 Python。
 
 ## 准备
 
-电脑安装与 Termune 架构一致的 VLC 3。Linux 需安装包含 `libvlc.so.5` 的 VLC 包；macOS 和 Windows 会尝试常见安装目录：
-
-```sh
-# Debian / Ubuntu
-sudo apt install vlc
-
-# macOS（Homebrew）
-brew install --cask vlc
-# 若命令不存在，将 VLC 加入 PATH：
-export PATH="/Applications/VLC.app/Contents/MacOS:$PATH"
-```
-
-Windows 可使用 winget：
-
-```powershell
-winget install --id VideoLAN.VLC -e
-```
-
-安装后重新打开终端。VLC 3 与 Termune 必须具有相同架构（例如均为 x64）。Windows ARM64 若没有原生 ARM64 VLC 3，请使用 x64 Termune 和 x64 VLC；不支持在 ARM64 Termune 中加载 x64 VLC 库。
-
+Termune v0.1.7 起内置 Symphonia 解码器，首次播放无需安装 VLC、FFmpeg 或下载解码组件。常见支持格式包括 MP3、FLAC、WAV、M4A（AAC-LC / ALAC）、Ogg Vorbis 和 Opus。APE 音频、WMA、DSD 和 HE-AAC 当前未覆盖。
 
 NAS 需要在线、开启 FN Connect、安装并初始化飞牛音乐，并创建**音乐独立账号**。FN ID 用于发现设备，不代替音乐账号认证。
 
@@ -138,7 +119,7 @@ termune update
 
 P 中分别选择布局、主题、语言和显示模式。M 随时切换极简 / 专业，保留布局偏好。专业模式显示歌词，极简保留曲库及基本播放控制。当前不展示封面。
 
-带时间戳的 LRC 歌词跟随 VLC 返回的实际位置，暂停停止、拖动后重新定位；纯文本歌词手动浏览。缺失歌词不会中断音乐。
+带时间戳的 LRC 歌词跟随音频输出进度，暂停停止、拖动后重新定位；纯文本歌词手动浏览。缺失歌词不会中断音乐。
 
 ## 自动登录与配置
 
@@ -173,19 +154,19 @@ termune --help          # 命令行帮助
 
 ## 从源码构建
 
-安装支持 Rust 2024 的稳定版工具链：
+构建需要支持 Rust 2024 的稳定版工具链，以及用于编译内置 Opus 解码器的 CMake 3.16+ 和 C 编译器。
 
 ```sh
 git clone https://github.com/Nyakooo/termune.git
 cd termune
 # Debian / Ubuntu 编译依赖
-sudo apt install pkg-config libdbus-1-dev libasound2-dev
+sudo apt install cmake pkg-config libdbus-1-dev libasound2-dev
 cargo build --release --locked
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-程序位于 `target/release/termune`。VLC 3（与程序架构一致）为播放运行依赖，不随资源包分发。
+程序位于 `target/release/termune`，Windows 为 `target/release/termune.exe`。
 
 ## 自动构建与发布
 
@@ -197,4 +178,4 @@ Python 只供 Actions 打包使用。操作流程见 [发布说明](docs/RELEASI
 
 ## 致谢
 
-感谢 Ratatui、Crossterm、VLC 及相关 Rust 项目。
+感谢 Ratatui、Crossterm、Symphonia、Rubato、Opus 及相关项目。内置音频组件的源码和许可见 [音频组件许可](docs/AUDIO_LICENSES.md)。

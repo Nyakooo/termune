@@ -13,7 +13,7 @@
 | x86_64-pc-windows-msvc | windows-latest |
 | aarch64-pc-windows-msvc | windows-11-arm |
 
-每个平台检查格式、Clippy、Rust 测试、打包测试及 release 构建，并执行 `--version` / `--help`。播放集成测试需要本机 VLC 和音频 fixture，默认忽略；工作流不会连接真实 NAS 或使用个人凭据。
+每个平台检查格式、Clippy、Rust 测试、打包测试及 release 构建，并执行 `--version` / `--help`。播放集成测试使用本地模拟 NAS 和合成音频，覆盖认证、解码、音效切换、Range 拖动、暂停和曲终。声卡静音测试默认忽略，可在有设备的环境中手动运行。
 
 ## 发布步骤
 
@@ -57,4 +57,4 @@ Linux / macOS 输出 `termune-<target>.tar.gz` 和无扩展名的 `termune-<targ
 
 CI 在 Linux / macOS 运行 Unix 安装 fixture，在 Windows x64 / ARM64 上分别用 PowerShell 5.1 和 PowerShell 7 运行安装 fixture，覆盖架构、校验失败保留旧程序、自定义路径、重复安装及 `irm | iex` 调用。所有 fixture 拦截下载，不接触真实用户安装或 NAS 凭据。
 
-音频运行需要与程序架构一致的 LibVLC 3；Linux 编译依赖 `libasound2-dev`，DSP 方案和验证见 [音效研究](AUDIO_EFFECTS_RESEARCH.md)。Windows 自更新采用 [self-replace](https://docs.rs/self-replace/latest/self_replace/)。
+音频解码器编入各平台二进制。构建内置 Opus 需要 CMake 和 C 编译器，Linux 另需 `libasound2-dev`。DSP 方案和验证见 [音效研究](AUDIO_EFFECTS_RESEARCH.md)。Windows 自更新采用 [self-replace](https://docs.rs/self-replace/latest/self_replace/)。

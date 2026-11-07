@@ -6,7 +6,6 @@ pub struct Timeline {
 }
 pub struct Player {
     decoder: crate::audio::Decoder,
-    bridge: termune::stream::Bridge,
     pub title: String,
     pub paused: bool,
     pub volume: u16,
@@ -19,11 +18,9 @@ impl Player {
         effect: usize,
         volume: u16,
     ) -> Result<Self> {
-        let bridge = source.bridge()?;
-        let decoder = crate::audio::Decoder::start(&bridge.url, effect, volume)?;
+        let decoder = crate::audio::Decoder::start(source, effect, volume)?;
         Ok(Self {
             decoder,
-            bridge,
             title,
             paused: false,
             volume,
@@ -48,27 +45,28 @@ impl Player {
             return Err("尚未取得歌曲时长，暂不能拖动".into());
         }
         self.decoder
-            .seek(fraction.clamp(0.0, 1.0) * self.timeline.duration);
-        Ok(())
+            .seek(fraction.clamp(0.0, 1.0) * self.timeline.duration)
     }
     pub fn poll(&mut self) -> Option<Result<()>> {
         let (position, duration) = self.decoder.time();
         self.timeline = Timeline { position, duration };
-        if let Ok(error) = self.bridge.errors.try_recv() {
-            return Some(Err(error));
-        }
         self.decoder.finished()
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires local VLC; uses synthetic WAV and fake NAS, never real credentials"]
-    fn real_vlc_bridge_reports_position_pause_seek_and_eof() {
-        exercise();
+    fn nas_stream_reports_position_pause_seek_and_eof() {
+        exercise(true);
     }
-    fn exercise() {
+
+    #[test]
+    fn nas_stream_without_ranges_still_plays() {
+        exercise(false);
+    }
+
+    fn exercise(supports_ranges: bool) {
         use std::{
             io::{Read, Write},
             net::TcpListener,
@@ -113,6 +111,7 @@ mod tests {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
                         let wav = wav.clone();
                         let ranges = seen.clone();
                         std::thread::spawn(move || {
@@ -157,7 +156,7 @@ mod tests {
                                 text.to_ascii_lowercase()
                                     .contains("cookie: music-token=synthetic-token")
                             );
-                            let range = text.lines().find_map(|l| {
+                            let range = text.lines().filter(|_| supports_ranges).find_map(|l| {
                                 l.split_once(':')
                                     .filter(|(k, _)| k.eq_ignore_ascii_case("range"))
                                     .map(|(_, v)| v.trim())
@@ -165,13 +164,15 @@ mod tests {
                             let mut start = 0;
                             let mut end = wav.len() - 1;
                             if let Some(range) = range {
-                                ranges.fetch_add(1, Ordering::Relaxed);
                                 let (a, b) = range
                                     .strip_prefix("bytes=")
                                     .unwrap()
                                     .split_once('-')
                                     .unwrap();
                                 start = a.parse().unwrap();
+                                if start > 0 && start < wav.len() {
+                                    ranges.fetch_add(1, Ordering::Relaxed);
+                                }
                                 if !b.is_empty() {
                                     end = b.parse::<usize>().unwrap().min(end);
                                 }
@@ -181,7 +182,7 @@ mod tests {
                                 return;
                             }
                             let mut h = format!(
-                                "HTTP/1.1 {} OK\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n",
+                                "HTTP/1.1 {} OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n",
                                 if range.is_some() { 206 } else { 200 },
                                 end - start + 1
                             );
@@ -229,38 +230,51 @@ mod tests {
         while player.timeline.duration < 19.0 {
             assert!(
                 started.elapsed() < Duration::from_secs(10),
-                "VLC did not report duration"
+                "Decoder did not report duration"
             );
             assert!(player.poll().is_none());
             std::thread::sleep(Duration::from_millis(80));
         }
         let before = player.timeline.position;
-        let handle = player.decoder.player_id_for_test();
         let rendered = player.decoder.rendered_for_test();
         for effect in 0..crate::effects::Effect::COUNT {
             player.set_effect(effect);
-            assert_eq!(player.decoder.player_id_for_test(), handle);
             assert!(player.timeline.duration > 19.0);
             std::thread::sleep(Duration::from_millis(80));
             assert!(player.poll().is_none());
             assert!(player.timeline.position >= before);
         }
         assert!(player.decoder.rendered_for_test() > rendered);
+        if !supports_ranges {
+            let before = player.timeline.position;
+            assert!(player.seek(0.6).is_err());
+            std::thread::sleep(Duration::from_millis(80));
+            assert!(player.poll().is_none());
+            assert!(player.timeline.position > before);
+            drop(player);
+            done.store(true, Ordering::Relaxed);
+            server.join().unwrap();
+            return;
+        }
+        let before_seek = ranges.load(Ordering::Relaxed);
+        let before_seek_frames = player.decoder.rendered_for_test();
         player.seek(0.6).unwrap();
         let started = Instant::now();
         while !(11.0..=14.0).contains(&player.timeline.position)
             || (player.timeline.duration - 20.0).abs() > 1.0
+            || ranges.load(Ordering::Relaxed) == before_seek
+            || player.decoder.rendered_for_test() <= before_seek_frames
         {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
-                "VLC seek not reflected in actual position"
+                "Seek not reflected in actual position"
             );
             assert!(player.poll().is_none());
             std::thread::sleep(Duration::from_millis(80));
         }
         assert!(
-            ranges.load(Ordering::Relaxed) > 0,
-            "VLC seek must reach NAS as Range"
+            ranges.load(Ordering::Relaxed) > before_seek,
+            "Seek must reach NAS as Range"
         );
         player.toggle().unwrap();
         std::thread::sleep(Duration::from_millis(500));
@@ -268,7 +282,7 @@ mod tests {
         let paused = player.timeline.position;
         std::thread::sleep(Duration::from_millis(600));
         player.poll();
-        assert!((player.timeline.position - paused).abs() < 1.1);
+        assert_eq!(player.timeline.position, paused);
         player.toggle().unwrap();
         player.seek(0.95).unwrap();
         let started = Instant::now();
@@ -283,6 +297,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+        assert!((player.timeline.position - 20.0).abs() < 0.02);
         drop(player);
         done.store(true, Ordering::Relaxed);
         server.join().unwrap();

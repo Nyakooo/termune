@@ -1,231 +1,147 @@
-//! Loopback-only seekable media bridge. NAS credentials never reach VLC.
+//! Seekable NAS audio input. Authentication and redirects stay in Session.
 use crate::{Result, Session};
-use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc,
-    },
-    time::Duration,
-};
+use reqwest::blocking::{Client, Response};
+use std::io::{self, Read, Seek, SeekFrom};
+use symphonia::core::io::MediaSource;
 
 #[derive(Clone)]
 pub struct AudioSource {
     pub session: Session,
     pub guid: String,
 }
-pub struct Bridge {
-    pub url: String,
-    stop: Arc<AtomicBool>,
-    pub errors: mpsc::Receiver<String>,
-}
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-}
+
 impl AudioSource {
-    pub fn bridge(self) -> Result<Bridge> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "无法创建本机音频通道")?;
-        let address = listener.local_addr().map_err(|_| "读取本机音频端口失败")?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| "无法配置音频通道")?;
-        let path = format!("/{}", crate::random_id()?);
-        let url = format!("http://{address}{path}");
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let source = Arc::new(self);
-        let active = Arc::new(AtomicUsize::new(0));
-        let (tx, errors) = mpsc::channel();
-        std::thread::spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((socket, _)) => {
-                        if active.fetch_add(1, Ordering::Relaxed) >= 6 {
-                            active.fetch_sub(1, Ordering::Relaxed);
-                            drop(socket);
-                            continue;
-                        }
-                        let source = source.clone();
-                        let path = path.clone();
-                        let flag = flag.clone();
-                        let active = active.clone();
-                        let tx = tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(error) = serve(socket, &path, &source, &flag)
-                                && !flag.load(Ordering::Relaxed)
-                            {
-                                let _ = tx.send(error);
-                            }
-                            active.fetch_sub(1, Ordering::Relaxed);
-                        });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(15))
-                    }
-                    Err(_) => break,
-                }
+    pub fn open(self) -> Result<AudioStream> {
+        let client = crate::client(10)?;
+        let response = self.request(&client, 0)?;
+        let (seekable, length, end) = if response.status().as_u16() == 206 {
+            let (length, end) = content_range(&response, 0)?;
+            (true, Some(length), Some(end))
+        } else {
+            let length = response.content_length();
+            (false, length, length)
+        };
+        Ok(AudioStream {
+            source: self,
+            client,
+            response,
+            seekable,
+            length,
+            end,
+            position: 0,
+        })
+    }
+
+    fn request(&self, client: &Client, start: u64) -> Result<Response> {
+        self.session
+            .audio_response(client, &self.guid, Some(&format!("bytes={start}-")))
+    }
+}
+
+pub struct AudioStream {
+    source: AudioSource,
+    client: Client,
+    response: Response,
+    seekable: bool,
+    length: Option<u64>,
+    end: Option<u64>,
+    position: u64,
+}
+
+impl AudioStream {
+    fn reopen(&mut self, start: u64) -> io::Result<()> {
+        let response = self
+            .source
+            .request(&self.client, start)
+            .map_err(io::Error::other)?;
+        let (length, end) = content_range(&response, start).map_err(io::Error::other)?;
+        if Some(length) != self.length {
+            return Err(io::Error::other("NAS 音频长度在播放中发生变化"));
+        }
+        self.response = response;
+        self.end = Some(end);
+        self.position = start;
+        Ok(())
+    }
+}
+
+impl Read for AudioStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() || self.length.is_some_and(|len| self.position >= len) {
+            return Ok(0);
+        }
+        if self.end == Some(self.position) {
+            self.reopen(self.position)?;
+        }
+        let count = self.end.map_or(buffer.len(), |end| {
+            (buffer.len() as u64).min(end - self.position) as usize
+        });
+        let count = self
+            .response
+            .read(&mut buffer[..count])
+            .map_err(|error| io::Error::new(error.kind(), "NAS 音频流读取失败"))?;
+        if count == 0 && self.end.is_some_and(|end| self.position < end) {
+            return Err(io::Error::other("NAS 音频流提前结束"));
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+impl Seek for AudioStream {
+    fn seek(&mut self, seek: SeekFrom) -> io::Result<u64> {
+        let target = match seek {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.length.and_then(|len| len.checked_add_signed(offset)),
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "无效的音频偏移"))?;
+        if target != self.position {
+            if !self.seekable {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "NAS 不支持音频拖动",
+                ));
             }
-        });
-        Ok(Bridge { url, stop, errors })
+            if self.length.is_some_and(|len| target >= len) {
+                self.position = target;
+            } else {
+                self.reopen(target)?;
+            }
+        }
+        Ok(self.position)
     }
-}
-fn configure_socket(socket: &TcpStream) -> Result<()> {
-    // Windows can inherit nonblocking mode from the listening socket.
-    // Worker threads use blocking reads/writes with bounded timeouts.
-    socket
-        .set_nonblocking(false)
-        .map_err(|_| "无法配置音频连接读取模式")?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|_| "音频请求超时设置失败")?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|_| "音频通道设置失败")?;
-    Ok(())
 }
 
-fn serve(mut socket: TcpStream, path: &str, source: &AudioSource, stop: &AtomicBool) -> Result<()> {
-    configure_socket(&socket)?;
-    let mut header = Vec::new();
-    let mut byte = [0];
-    while !header.ends_with(b"\r\n\r\n") {
-        if header.len() >= 8192 {
-            return Err("本机音频请求头过长".into());
-        }
-        if socket.read(&mut byte).map_err(|_| "本机音频请求失败")? == 0 {
-            return Ok(());
-        }
-        header.push(byte[0]);
+impl MediaSource for AudioStream {
+    fn is_seekable(&self) -> bool {
+        self.seekable
     }
-    let text = std::str::from_utf8(&header).map_err(|_| "本机音频请求编码错误")?;
-    let mut lines = text.lines();
-    let request = lines
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    if request.len() != 3 || request[1] != path || !matches!(request[0], "GET" | "HEAD") {
-        let _ = socket
-            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        return Ok(());
+
+    fn byte_len(&self) -> Option<u64> {
+        self.length
     }
-    let range = lines.find_map(|line| {
-        line.split_once(':')
-            .filter(|(k, _)| k.eq_ignore_ascii_case("range"))
-            .map(|(_, v)| v.trim())
-    });
-    if range.is_some_and(|s| {
-        !s.starts_with("bytes=")
-            || s.len() > 80
-            || !s
-                .bytes()
-                .all(|b| b.is_ascii_digit() || b"bytes=-".contains(&b))
-    }) {
-        return Err("本机音频 Range 格式无效".into());
-    }
-    let response = match source
-        .session
-        .audio_response(&crate::client(3600)?, &source.guid, range)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = socket.write_all(
-                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-            return Err(e);
+}
+
+// Returns the full length and the exclusive end of this response.
+fn content_range(response: &Response, requested: u64) -> Result<(u64, u64)> {
+    let parse = || {
+        if response.status().as_u16() != 206 {
+            return None;
         }
+        let value = response.headers().get("content-range")?.to_str().ok()?;
+        let (range, length) = value.strip_prefix("bytes ")?.split_once('/')?;
+        let (start, end) = range.split_once('-')?;
+        let start = start.parse::<u64>().ok()?;
+        let end = end.parse::<u64>().ok()?.checked_add(1)?;
+        let length = length.parse::<u64>().ok()?;
+        (start == requested
+            && start < end
+            && end <= length
+            && response
+                .content_length()
+                .is_none_or(|size| size == end - start))
+        .then_some((length, end))
     };
-    if range.is_some_and(|s| !s.starts_with("bytes=0-")) && response.status().as_u16() != 206 {
-        return Err("NAS 不支持所请求的拖动区间".into());
-    }
-    if let Some(range) = range
-        && response.status().as_u16() == 206
-    {
-        let start = range
-            .trim_start_matches("bytes=")
-            .split('-')
-            .next()
-            .unwrap_or("0");
-        let prefix = format!("bytes {start}-");
-        if !response
-            .headers()
-            .get("content-range")
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|s| s.starts_with(&prefix))
-        {
-            return Err("NAS 返回的音频区间与拖动位置不一致".into());
-        }
-    }
-    let status = response.status().as_u16();
-    let mut headers = format!("HTTP/1.1 {status} OK\r\nConnection: close\r\n");
-    for name in [
-        "content-type",
-        "content-length",
-        "content-range",
-        "accept-ranges",
-    ] {
-        if let Some(value) = response.headers().get(name).and_then(|h| h.to_str().ok()) {
-            headers.push_str(&format!("{name}: {value}\r\n"));
-        }
-    }
-    headers.push_str("\r\n");
-    if socket.write_all(headers.as_bytes()).is_err() {
-        return Ok(());
-    }
-    if request[0] == "HEAD" {
-        return Ok(());
-    }
-    let mut reader = response;
-    let mut buffer = [0; 32768];
-    while !stop.load(Ordering::Relaxed) {
-        let n = reader.read(&mut buffer).map_err(|_| "NAS 音频流读取失败")?;
-        if n == 0 {
-            break;
-        }
-        if socket.write_all(&buffer[..n]).is_err() {
-            break;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn accepted_nonblocking_connection_waits_for_delayed_data() {
-        use std::sync::mpsc::{self, RecvTimeoutError};
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut socket, _) = listener.accept().unwrap();
-        // Model Windows inheriting nonblocking mode from the listener, even on Linux.
-        socket.set_nonblocking(true).unwrap();
-        let (ready, wait_ready) = mpsc::channel();
-        let (result, wait_result) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            configure_socket(&socket).unwrap();
-            ready.send(()).unwrap();
-            let mut bytes = [0; 4];
-            let read = socket.read_exact(&mut bytes).map(|()| bytes);
-            let _ = result.send(read);
-        });
-        wait_ready.recv_timeout(Duration::from_secs(2)).unwrap();
-        match wait_result.recv_timeout(Duration::from_millis(100)) {
-            Err(RecvTimeoutError::Timeout) => {}
-            other => panic!("Accepted socket must wait for request data, got {other:?}"),
-        }
-        client.write_all(b"ping").unwrap();
-        assert_eq!(
-            wait_result
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap()
-                .unwrap(),
-            *b"ping"
-        );
-        reader.join().unwrap();
-    }
+    parse().ok_or_else(|| "NAS 返回了无效的音频区间".into())
 }

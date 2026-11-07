@@ -1,0 +1,3 @@
+[target.'cfg(all(windows, target_env = "msvc"))']
+# The bundled Opus decoder and Termune use the same static C runtime.
+rustflags = ["-C", "target-feature=+crt-static"]

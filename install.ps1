@@ -64,7 +64,6 @@
         }
         Write-Host "Installed: $destination"
         Write-Host 'Run: termune (open a new terminal if needed).'
-        Write-Host 'Playback requires VLC; install with: winget install --id VideoLAN.VLC -e'
     } finally {
         if ($staged -and (Test-Path -LiteralPath $staged)) { Remove-Item -LiteralPath $staged -Force }
         Remove-Item -LiteralPath $temporary -Recurse -Force

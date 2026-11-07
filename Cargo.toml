@@ -1,13 +1,15 @@
 [package]
 name = "termune"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Terminal library browser for Feiniu Music"
 repository = "https://github.com/Nyakooo/termune"
 
 [dependencies]
 cpal = "0.16"
-libloading = "0.8"
+symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
+symphonia-adapter-libopus = "0.3"
+rubato = "0.16"
 crossterm = "0.28"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive"] }
