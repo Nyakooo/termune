@@ -125,9 +125,14 @@ fn login_render_masks_password_and_handles_small_terminals() {
     ];
     app.focus = 2;
     let normal = render(&mut app, 100, 32);
-    assert!(normal.contains("termune"));
+    assert!(normal.contains("TERMUNE"));
     assert!(!normal.contains("never-show-secret"));
     assert!(normal.contains("••••"));
+    let password = std::mem::take(&mut app.fields[2]);
+    let empty_password = render(&mut app, 100, 32);
+    assert_eq!(empty_password.matches('▏').count(), 1);
+    assert!(!empty_password.contains('▎'));
+    app.fields[2] = password;
     for (w, h) in [(36, 16), (45, 20), (1, 1), (20, 8)] {
         let text = render(&mut app, w, h);
         assert!(!text.contains("never-show-secret"));
@@ -142,9 +147,14 @@ fn login_shortcut_letters_remain_typable_and_small_form_is_usable() {
     }
     assert_eq!(app.fields[0], "gtmld");
     let screen = render(&mut app, 36, 20);
-    assert!(screen.contains("?"));
+    assert!(screen.contains("[F1 帮助]"));
     assert!(screen.contains("下次自动登录"));
-    assert!(screen.contains("连接飞牛音乐"));
+    assert!(screen.contains("登录飞牛音乐"));
+    assert!(
+        screen
+            .lines()
+            .any(|line| line.contains("登录") && line.contains("Enter"))
+    );
     assert_eq!(
         app.hits
             .iter()
@@ -161,6 +171,49 @@ fn login_shortcut_letters_remain_typable_and_small_form_is_usable() {
         app.hits
             .iter()
             .all(|(rect, _)| rect.right() <= 36 && rect.bottom() <= 20)
+    );
+    key(&mut app, KeyCode::F(1));
+    assert!(app.help);
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.fields[0], "gtmld?");
+}
+
+#[test]
+fn login_button_click_only_submits_inside_the_button() {
+    let mut app = app();
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    app.fields = ["test-id".into(), "listener".into(), "secret".into()];
+    app.focus = 2;
+    render(&mut app, 86, 29);
+    let button = app
+        .hits
+        .iter()
+        .find_map(|(rect, action)| matches!(action, Action::Connect).then_some(*rect))
+        .unwrap();
+    assert_eq!((button.width, button.height), (14, 1));
+    let click = |column, row| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    app.event(click(button.right(), button.y));
+    assert!(commands.try_recv().is_err());
+    app.event(click(button.x, button.y));
+    assert!(matches!(
+        commands.try_recv().unwrap(),
+        Command::Login { .. }
+    ));
+    let screen = render(&mut app, 86, 29);
+    assert!(screen.contains("正在连接…"));
+    assert!(
+        !app.hits
+            .iter()
+            .any(|(_, action)| matches!(action, Action::Connect | Action::ToggleRemember))
     );
 }
 
@@ -278,6 +331,7 @@ fn stale_response_is_discarded_and_failed_search_preserves_library() {
         page: 2,
         query: None,
         detail: None,
+        selection: None,
     };
     tx.send(Reply::Page(
         load,
@@ -298,6 +352,7 @@ fn stale_response_is_discarded_and_failed_search_preserves_library() {
             page: 1,
             query: Some("搜索".into()),
             detail: None,
+            selection: None,
         },
         Err("请求超时".into()),
     ))
@@ -561,6 +616,7 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
         detail: None,
         index: 49,
         total: 51,
+        playlist: None,
     });
     app.playing_item = Some(json!({"guid":"original","title":"song"}));
     app.config.playback_mode = crate::queue::Mode::RepeatOne;
@@ -614,6 +670,7 @@ fn shuffle_previous_uses_actual_history() {
         detail: None,
         index: 3,
         total: 6,
+        playlist: None,
     });
     app.shuffle_history.push(PlaybackContext {
         section: 3,
@@ -621,6 +678,7 @@ fn shuffle_previous_uses_actual_history() {
         detail: None,
         index: 1,
         total: 6,
+        playlist: None,
     });
     app.advance(false, false);
     assert!(matches!(commands.recv().unwrap(),Command::Advance{context,..}if context.index==1));
@@ -684,6 +742,52 @@ fn volume_keys_work_in_settings_and_match_mouse_actions() {
 }
 
 #[test]
+fn original_volume_meter_supports_click_drag_and_cancel() {
+    let mut app = app();
+    app.connected = true;
+    app.config.volume = 45;
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▱▱ 45% +"));
+    app.config.volume = 100;
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰ 100% +"));
+    let point = app
+        .hits
+        .iter()
+        .find_map(|(hit, action)| matches!(action, Action::VolumeAt(75, _)).then_some(*hit))
+        .expect("volume meter has clickable cells");
+    let mouse = |kind, column| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row: point.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x));
+    assert_eq!(app.config.volume, 75);
+
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), point.x - 2));
+    assert_eq!(app.config.volume, 75);
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▱ 65% +"));
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x - 2));
+    assert_eq!(app.config.volume, 65);
+
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
+    assert_eq!(app.volume_drag.as_ref().unwrap().preview, Some(0));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.volume_drag.is_none());
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
+    assert_eq!(app.config.volume, 65);
+
+    let path = app.config.path_override.as_ref().unwrap();
+    let saved: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(saved.volume, 65);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn settings_support_hjkl_and_preserve_text_input() {
     let mut app = app();
     app.connected = true;
@@ -710,7 +814,10 @@ fn library_tabs_have_natural_width_and_remember_category() {
     let mut app = app();
     app.connected = true;
     app.views.iter_mut().for_each(|v| v.loaded = true);
-    assert_eq!(KINDS, ["album", "artist", "genre", "track", "favorite"]);
+    assert_eq!(
+        KINDS,
+        ["album", "artist", "genre", "track", "favorite", "playlist"]
+    );
     key(&mut app, KeyCode::Char('2'));
     assert_eq!(app.section, 1);
     let saved = std::fs::read_to_string(app.config.path_override.as_ref().unwrap()).unwrap();
@@ -718,17 +825,19 @@ fn library_tabs_have_natural_width_and_remember_category() {
     let restored = App::with_config(config, String::new(), false);
     assert_eq!(restored.section, 1);
     let text = render(&mut app, 120, 36);
-    assert!(!text.contains("歌单"));
+    assert!(text.contains("歌单"));
     let tabs: Vec<_> = app
         .hits
         .iter()
         .filter(|(_, action)| matches!(action, Action::Section(_)))
         .collect();
-    assert_eq!(tabs.len(), 5);
+    assert_eq!(tabs.len(), 6);
     assert!(tabs[0].0.width < tabs[3].0.width);
     assert_eq!(tabs[1].0.x - tabs[0].0.right(), 2);
     key(&mut app, KeyCode::BackTab);
     assert_eq!(app.section, 0);
+    key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.section, PLAYLISTS);
     key(&mut app, KeyCode::BackTab);
     assert_eq!(app.section, FAVORITES);
 }
@@ -794,4 +903,363 @@ fn lyric_hit_regions_follow_word_wrapping_and_skip_plain_text() {
     assert!(timed.iter().all(|(_, i)| *i != 1));
     assert!(timed.iter().any(|(_, i)| *i == 2));
     assert!(timed.iter().find(|(_, i)| *i == 0).unwrap().0.height > 1);
+}
+
+#[test]
+fn playlist_workflow_restores_song_combinations_and_isolates_accounts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = Config {
+        fn_id: "test-nas".into(),
+        username: "listener".into(),
+        path_override: Some(path.clone()),
+        last_category: "track".into(),
+        ..Default::default()
+    };
+    let mut app = App::with_config(config, String::new(), false);
+    app.connected = true;
+    app.views[TRACKS] = View {
+        items: vec![json!({"guid":"track-1","title":"晴天","artists":[{"name":"周杰伦"}]})],
+        total: 1,
+        loaded: true,
+        table: TableState::default().with_selected(Some(0)),
+        ..Default::default()
+    };
+
+    key(&mut app, KeyCode::Char('a'));
+    assert!(render(&mut app, 100, 32).contains("新建歌单并添加歌曲"));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.error);
+    app.event(Event::Paste("通勤".into()));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.playlists[0].tracks[0]["guid"], "track-1");
+
+    key(&mut app, KeyCode::Char('6'));
+    key(&mut app, KeyCode::Char('c'));
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.event(Event::Paste("早上".into()));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view().items[0]["name"], "早上");
+    key(&mut app, KeyCode::Char('n'));
+    app.event(Event::Paste("晚上".into()));
+    key(&mut app, KeyCode::Enter);
+
+    key(&mut app, KeyCode::Char('4'));
+    key(&mut app, KeyCode::Char('a'));
+    assert!(render(&mut app, 100, 32).contains("选择要加入的歌单"));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.error);
+    assert_eq!(app.playlists[0].tracks.len(), 1);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.playlists[1].tracks[0]["guid"], "track-1");
+
+    key(&mut app, KeyCode::Char('6'));
+    drop(app);
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config.path_override = Some(path);
+    let mut app = App::with_config(config, String::new(), false);
+    assert_eq!(app.section, PLAYLISTS);
+    let (replies, events) = mpsc::channel();
+    app.rx = events;
+    replies
+        .send(Reply::Connected(
+            0,
+            Ok(Connected {
+                server: "test NAS".into(),
+                username: "listener".into(),
+                route: "HTTPS".into(),
+                remembered: true,
+                warning: None,
+            }),
+        ))
+        .unwrap();
+    app.replies();
+    assert_eq!(app.view().total, 2);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view().items[0]["title"], "晴天");
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    key(&mut app, KeyCode::Char('d'));
+    let modal = render(&mut app, 36, 20);
+    assert!(modal.contains("从歌单移除歌曲？"));
+    assert!(modal.contains("曲库里的原曲会保留。"));
+    assert!(modal.contains("晴天"));
+    assert_eq!(app.view().total, 1);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view().total, 1);
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.view().total, 1);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view().total, 0);
+    assert_eq!(app.playlists[1].tracks[0]["guid"], "track-1");
+    key(&mut app, KeyCode::Esc);
+
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Delete);
+    let modal = render(&mut app, 36, 20);
+    assert!(modal.contains("删除歌单？"));
+    assert!(modal.contains("曲库里的原曲会保留。"));
+    assert!(modal.contains("晚上"));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view().total, 2);
+    key(&mut app, KeyCode::Delete);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view().total, 1);
+    assert!(commands.try_recv().is_err());
+
+    app.config.username = "other".into();
+    app.read_playlists().unwrap();
+    assert!(app.playlists.is_empty());
+    app.config.username = "listener".into();
+    app.read_playlists().unwrap();
+    assert_eq!(app.playlists.len(), 1);
+    assert_eq!(app.playlists[0].name, "早上");
+    assert!(app.playlists[0].tracks.is_empty());
+}
+
+#[test]
+fn playlist_queue_crosses_pages_and_keeps_its_original_tracks() {
+    let mut app = app();
+    app.connected = true;
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    app.section = PLAYLISTS;
+    app.playlists.push(Playlist {
+        id: "folder".into(),
+        name: "Mix".into(),
+        tracks: (0..51)
+            .map(|index| json!({"guid":format!("song-{index}"),"title":"Test"}))
+            .collect(),
+    });
+    app.detail = Some(Detail {
+        kind: "playlist".into(),
+        guid: "folder".into(),
+        name: "Mix".into(),
+    });
+    app.load_playlist_page(1, 49);
+    key(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-49")
+    );
+
+    app.load_playlist_page(2, 0);
+    assert_eq!(app.view().items[0]["guid"], "song-50");
+    app.playlists.clear();
+    app.detail = None;
+    app.section = TRACKS;
+    app.config.playback_mode = crate::queue::Mode::Loop;
+    app.advance(true, true);
+    assert!(
+        matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-50")
+    );
+    app.advance(true, true);
+    assert!(matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-0"));
+}
+
+#[test]
+fn playlist_edits_merge_with_changes_from_another_instance() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let instance = || {
+        let config = Config {
+            fn_id: "test-nas".into(),
+            username: "listener".into(),
+            path_override: Some(path.clone()),
+            last_category: "playlist".into(),
+            ..Default::default()
+        };
+        let mut app = App::with_config(config, String::new(), false);
+        app.connected = true;
+        app.read_playlists().unwrap();
+        app
+    };
+    let mut first = instance();
+    let mut second = instance();
+    key(&mut first, KeyCode::Char('n'));
+    first.event(Event::Paste("First".into()));
+    key(&mut first, KeyCode::Enter);
+    key(&mut second, KeyCode::Char('n'));
+    second.event(Event::Paste("Second".into()));
+    key(&mut second, KeyCode::Enter);
+
+    assert_eq!(first.playlists.len(), 1);
+    assert_eq!(second.playlists.len(), 2);
+    assert_eq!(second.playlists[0].name, "First");
+    assert_eq!(second.playlists[1].name, "Second");
+}
+
+#[test]
+fn category_sort_moves_active_tab_and_survives_restart() {
+    let mut app = app();
+    app.connected = true;
+    app.views.iter_mut().for_each(|view| view.loaded = true);
+    key(&mut app, KeyCode::Char('6'));
+    for code in [KeyCode::Left, KeyCode::Char('h')] {
+        app.key(KeyEvent::new(code, KeyModifiers::ALT));
+    }
+    assert_eq!(app.section, PLAYLISTS);
+    assert_eq!(app.category_order, [0, 1, 2, PLAYLISTS, TRACKS, FAVORITES]);
+    let path = app.config.path_override.as_ref().unwrap().clone();
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config.path_override = Some(path.clone());
+    let mut app = App::with_config(config, String::new(), false);
+    app.connected = true;
+    app.views.iter_mut().for_each(|view| view.loaded = true);
+    assert_eq!(app.section, PLAYLISTS);
+    render(&mut app, 120, 36);
+    let rendered: Vec<_> = app
+        .hits
+        .iter()
+        .filter_map(|(_, action)| match action {
+            Action::Section(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rendered, [0, 1, 2, PLAYLISTS, TRACKS, FAVORITES]);
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.section, TRACKS);
+    key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.section, PLAYLISTS);
+    for code in [KeyCode::Right, KeyCode::Char('l'), KeyCode::Right] {
+        app.key(KeyEvent::new(code, KeyModifiers::ALT));
+    }
+    assert_eq!(app.category_order, [0, 1, 2, TRACKS, FAVORITES, PLAYLISTS]);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn remembers_library_page_and_track_after_reconnecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = Config {
+        fn_id: "test-nas".into(),
+        username: "listener".into(),
+        path_override: Some(path.clone()),
+        last_category: "track".into(),
+        ..Default::default()
+    };
+    let mut app = App::with_config(config, String::new(), false);
+    assert!(app.config.remember_location);
+    app.connected = true;
+    app.views[TRACKS] = View {
+        items: (0..5)
+            .map(|i| json!({"guid": format!("song-{i}")}))
+            .collect(),
+        page: 2,
+        loaded: true,
+        table: TableState::default().with_selected(Some(2)),
+        ..Default::default()
+    };
+    app.checkpoint_location();
+    drop(app);
+
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config.path_override = Some(path.clone());
+    let mut app = App::with_config(config, String::new(), false);
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    let (replies, events) = mpsc::channel();
+    app.rx = events;
+    replies
+        .send(Reply::Connected(
+            0,
+            Ok(Connected {
+                server: "test NAS".into(),
+                username: "listener".into(),
+                route: "HTTPS".into(),
+                remembered: true,
+                warning: None,
+            }),
+        ))
+        .unwrap();
+    app.replies();
+    let Command::Load(load) = commands.try_recv().unwrap() else {
+        panic!("expected page load")
+    };
+    assert_eq!((load.section, load.page), (TRACKS, 2));
+    replies
+        .send(Reply::Page(
+            load,
+            Ok(Page {
+                items: vec![json!({"guid": "new"}), json!({"guid": "song-2"})],
+                total: 52,
+            }),
+        ))
+        .unwrap();
+    app.replies();
+    assert_eq!(app.view().page, 2);
+    assert_eq!(app.view().table.selected(), Some(1));
+
+    app.action(Action::Settings);
+    let settings = render(&mut app, 100, 32);
+    assert!(settings.contains("记忆位置"));
+    app.action(Action::ChangeSetting(DISCONNECT_SETTING - 1, 1));
+    assert!(!app.config.remember_location);
+    let config: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert!(!config.remember_location);
+    app.restore_location();
+    let Command::Load(load) = commands.try_recv().unwrap() else {
+        panic!("expected default page")
+    };
+    assert_eq!((load.section, load.page), (0, 1));
+    assert!(load.selection.is_none());
+}
+
+#[test]
+fn remembers_open_playlist_and_selected_track() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = Config {
+        fn_id: "test-nas".into(),
+        username: "listener".into(),
+        path_override: Some(path.clone()),
+        last_category: "playlist".into(),
+        ..Default::default()
+    };
+    let mut app = App::with_config(config, String::new(), false);
+    app.connected = true;
+    key(&mut app, KeyCode::Char('n'));
+    app.event(Event::Paste("通勤".into()));
+    key(&mut app, KeyCode::Enter);
+    app.switch(TRACKS);
+    app.views[TRACKS] = View {
+        items: vec![
+            json!({"guid": "first", "title": "第一首"}),
+            json!({"guid": "second", "title": "第二首"}),
+        ],
+        page: 1,
+        total: 2,
+        loaded: true,
+        table: TableState::default().with_selected(Some(0)),
+    };
+    app.busy = false;
+    for row in 0..2 {
+        app.action(Action::Row(row));
+        key(&mut app, KeyCode::Char('a'));
+        key(&mut app, KeyCode::Enter);
+    }
+    app.switch(PLAYLISTS);
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.view().table.selected(), Some(1));
+    app.checkpoint_location();
+    drop(app);
+
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config.path_override = Some(path);
+    let mut app = App::with_config(config, String::new(), false);
+    app.connected = true;
+    app.read_playlists().unwrap();
+    app.restore_location();
+    assert_eq!(app.detail.as_ref().unwrap().name, "通勤");
+    assert_eq!(app.view().table.selected(), Some(1));
+    assert_eq!(app.view().items[1]["guid"], "second");
+
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Enter);
+    app.restore_location();
+    assert_eq!(app.view().table.selected(), Some(0));
+    assert_eq!(app.view().items[0]["guid"], "first");
 }

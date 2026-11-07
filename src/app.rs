@@ -20,9 +20,19 @@ use std::{
 };
 use termune::{Result, Session, library::Page};
 
-pub const KINDS: [&str; 5] = ["album", "artist", "genre", "track", "favorite"];
+pub const KINDS: [&str; 6] = ["album", "artist", "genre", "track", "favorite", "playlist"];
 pub const TRACKS: usize = 3;
 pub const FAVORITES: usize = 4;
+pub const PLAYLISTS: usize = 5;
+pub const DISCONNECT_SETTING: usize = 5;
+
+mod location;
+pub use location::BrowseLocation;
+use location::BrowseSelection;
+
+mod playlists;
+use playlists::Playlist;
+pub use playlists::PlaylistDialog;
 
 #[cfg(test)]
 #[path = "app_tests.rs"]
@@ -36,7 +46,7 @@ pub struct View {
     pub loaded: bool,
     pub table: TableState,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Detail {
     pub kind: String,
     pub guid: String,
@@ -49,6 +59,7 @@ struct Load {
     page: u64,
     query: Option<String>,
     detail: Option<Detail>,
+    selection: Option<BrowseSelection>,
 }
 enum Command {
     Login {
@@ -122,6 +133,7 @@ struct PlaybackContext {
     detail: Option<Detail>,
     index: u64,
     total: u64,
+    playlist: Option<Arc<[Value]>>,
 }
 #[derive(Clone, Copy)]
 pub enum Action {
@@ -129,6 +141,7 @@ pub enum Action {
     Connect,
     ToggleRemember,
     Section(usize),
+    Back,
     Row(usize),
     Previous,
     Next,
@@ -149,11 +162,25 @@ pub enum Action {
     CycleMode,
     CycleEffect,
     Volume(i16),
+    VolumeAt(u16, u16),
     Favorite,
+    PlaylistNew,
+    PlaylistRename,
+    PlaylistDelete,
+    PlaylistAdd,
+    PlaylistPick(usize),
+    PlaylistConfirm,
     ToggleMode,
     FollowLyrics,
     Search,
     Refresh,
+}
+
+pub struct VolumeDrag {
+    column: u16,
+    initial: u16,
+    click: u16,
+    pub preview: Option<u16>,
 }
 
 pub struct App {
@@ -168,7 +195,10 @@ pub struct App {
     pub username: String,
     pub route: String,
     pub section: usize,
-    pub views: [View; 5],
+    pub category_order: [usize; KINDS.len()],
+    pub views: [View; KINDS.len()],
+    pub playlists: Vec<Playlist>,
+    pub playlist_dialog: Option<PlaylistDialog>,
     pub search_view: View,
     pub detail_view: View,
     pub query: Option<String>,
@@ -192,6 +222,7 @@ pub struct App {
     pub lyrics_follow: bool,
     pub seek_drag: Option<f64>,
     pub seek_rect: Option<Rect>,
+    pub volume_drag: Option<VolumeDrag>,
     playing_context: Option<PlaybackContext>,
     shuffle_history: Vec<PlaybackContext>,
     favorite_busy: bool,
@@ -561,10 +592,20 @@ impl App {
         let latest = Arc::new(AtomicU64::new(0));
         let worker_latest = latest.clone();
         std::thread::spawn(move || worker(commands, replies, worker_latest));
-        let section = KINDS
-            .iter()
-            .position(|kind| *kind == config.last_category)
-            .unwrap_or(0);
+        let section = if config.remember_location {
+            KINDS
+                .iter()
+                .position(|kind| *kind == config.last_category)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut category_order = std::array::from_fn(|i| i);
+        for kind in config.category_order.iter().rev() {
+            if let Some(position) = category_order.iter().position(|&id| KINDS[id] == kind) {
+                category_order[..=position].rotate_right(1);
+            }
+        }
         Self {
             fields: [config.fn_id.clone(), config.username.clone(), String::new()],
             remember: config.auto_login,
@@ -581,7 +622,10 @@ impl App {
             username: String::new(),
             route: String::new(),
             section,
+            category_order,
             views: std::array::from_fn(|_| View::default()),
+            playlists: Vec::new(),
+            playlist_dialog: None,
             search_view: View::default(),
             detail_view: View::default(),
             query: None,
@@ -605,6 +649,7 @@ impl App {
             lyrics_follow: true,
             seek_drag: None,
             seek_rect: None,
+            volume_drag: None,
             playing_context: None,
             shuffle_history: Vec::new(),
             favorite_busy: false,
@@ -660,6 +705,17 @@ impl App {
         }
     }
     fn load(&mut self, page: u64) {
+        self.load_with_selection(page, None);
+    }
+    fn load_with_selection(&mut self, page: u64, selection: Option<BrowseSelection>) {
+        if self.section == PLAYLISTS {
+            self.cancel();
+            self.load_playlist_page(page, 0);
+            if let Some(selection) = selection {
+                selection.apply(self.view_mut());
+            }
+            return;
+        }
         let id = self.next_id();
         self.busy = true;
         self.error = false;
@@ -671,6 +727,7 @@ impl App {
             page,
             query: self.query.clone(),
             detail: self.detail.clone(),
+            selection,
         };
         if self.tx.send(Command::Load(load)).is_err() {
             self.fail("后台任务已停止".into());
@@ -725,6 +782,7 @@ impl App {
         self.busy = false;
     }
     fn logout(&mut self) {
+        self.checkpoint_location();
         self.settings = None;
         self.help = false;
         self.media_epoch = self.media_epoch.wrapping_add(1);
@@ -738,6 +796,8 @@ impl App {
         let _ = self.tx.send(Command::Logout);
         self.connected = false;
         self.views = std::array::from_fn(|_| View::default());
+        self.playlists.clear();
+        self.playlist_dialog = None;
         self.query = None;
         self.detail = None;
         self.editing = false;
@@ -790,7 +850,10 @@ impl App {
                         if let Err(error) = self.config.save() {
                             self.notice = Some(error);
                         }
-                        self.load(1);
+                        if let Err(error) = self.read_playlists() {
+                            self.notice = Some(error);
+                        }
+                        self.restore_location();
                     }
                     Err(e) => self.fail(e),
                 },
@@ -800,7 +863,7 @@ impl App {
                         Ok(page) => {
                             let max_page = page.total.div_ceil(50).max(1);
                             if load.page > max_page {
-                                self.load(max_page);
+                                self.load_with_selection(max_page, load.selection);
                                 continue;
                             }
                             let loaded = page.items.len();
@@ -810,7 +873,9 @@ impl App {
                             view.page = load.page;
                             view.loaded = true;
                             view.table = TableState::default();
-                            if loaded > 0 {
+                            if let Some(selection) = load.selection {
+                                selection.apply(view);
+                            } else if loaded > 0 {
                                 view.table.select(Some(0));
                             }
                             self.status = if self.config.english {
@@ -956,11 +1021,11 @@ impl App {
         self.playing_context = None;
         self.seek_drag = None;
     }
+    pub fn track_view(&self) -> bool {
+        matches!(self.section, TRACKS | FAVORITES) || self.query.is_some() || self.detail.is_some()
+    }
     fn play_selected(&mut self) {
-        if !matches!(self.section, TRACKS | FAVORITES)
-            && self.query.is_none()
-            && self.detail.is_none()
-        {
+        if !self.track_view() {
             return;
         }
         let item = self
@@ -979,6 +1044,9 @@ impl App {
             detail: self.detail.clone(),
             index: (view.page.max(1) - 1) * 50 + view.table.selected().unwrap_or(0) as u64,
             total: view.total.max(view.items.len() as u64),
+            playlist: self
+                .open_playlist()
+                .map(|playlist| playlist.tracks.clone().into()),
         };
         self.shuffle_history.clear();
         self.start_item(item, context);
@@ -1028,13 +1096,7 @@ impl App {
             && !forward
             && let Some(previous) = self.shuffle_history.pop()
         {
-            self.stop_audio();
-            self.playing_context = Some(previous.clone());
-            self.audio_loading = Some(self.text("准备上一首…", "Loading previous track…").into());
-            let _ = self.tx.send(Command::Advance {
-                id: self.audio_generation,
-                context: previous,
-            });
+            self.advance_to(previous, false);
             return;
         }
         let random = termune::random_id()
@@ -1057,9 +1119,25 @@ impl App {
             self.shuffle_history.push(context.clone());
         }
         context.index = index;
+        self.advance_to(context, forward);
+    }
+    fn advance_to(&mut self, context: PlaybackContext, forward: bool) {
+        if let Some(tracks) = &context.playlist {
+            if let Some(item) = tracks.get(context.index as usize) {
+                self.start_item(item.clone(), context);
+            }
+            return;
+        }
         self.stop_audio();
         self.playing_context = Some(context.clone());
-        self.audio_loading = Some(self.text("准备下一首…", "Loading next track…").into());
+        self.audio_loading = Some(
+            if forward {
+                self.text("准备下一首…", "Loading next track…")
+            } else {
+                self.text("准备上一首…", "Loading previous track…")
+            }
+            .into(),
+        );
         if self
             .tx
             .send(Command::Advance {
@@ -1073,11 +1151,7 @@ impl App {
         }
     }
     fn favorite(&mut self) {
-        if self.favorite_busy
-            || (!matches!(self.section, TRACKS | FAVORITES)
-                && self.query.is_none()
-                && self.detail.is_none())
-        {
+        if self.favorite_busy || !self.track_view() || self.section == PLAYLISTS {
             return;
         }
         let Some(item) = self
@@ -1111,14 +1185,46 @@ impl App {
             self.play_selected();
         }
     }
+    pub fn category_position(&self) -> usize {
+        self.category_order
+            .iter()
+            .position(|&id| id == self.section)
+            .expect("all library categories are in the tab order")
+    }
+    fn reorder_category(&mut self, delta: isize) {
+        let position = self.category_position();
+        let Some(target) = position
+            .checked_add_signed(delta)
+            .filter(|&i| i < KINDS.len())
+        else {
+            return;
+        };
+        let mut order = self.category_order;
+        order.swap(position, target);
+        let previous = std::mem::replace(
+            &mut self.config.category_order,
+            order.iter().map(|&id| KINDS[id].to_owned()).collect(),
+        );
+        if let Err(error) = self.config.save() {
+            self.config.category_order = previous;
+            self.status = error;
+            self.error = true;
+            return;
+        }
+        self.category_order = order;
+        self.status = self.text("已保存类目顺序", "Category order saved").into();
+        self.error = false;
+    }
     fn switch(&mut self, section: usize) {
         if section >= KINDS.len() {
             return;
         }
         self.cancel();
         self.section = section;
-        self.config.last_category = KINDS[section].into();
-        self.save();
+        if self.config.remember_location {
+            self.config.last_category = KINDS[section].into();
+            self.save();
+        }
         self.query = None;
         self.detail = None;
         self.editing = false;
@@ -1133,10 +1239,7 @@ impl App {
         if self.busy {
             return;
         }
-        if matches!(self.section, TRACKS | FAVORITES)
-            || self.query.is_some()
-            || self.detail.is_some()
-        {
+        if self.track_view() {
             self.play_selected();
             return;
         }
@@ -1203,10 +1306,11 @@ impl App {
         let Some(guid) = item["guid"].as_str() else {
             return;
         };
-        let track = playing
-            || matches!(self.section, TRACKS | FAVORITES)
-            || self.query.is_some()
-            || self.detail.is_some();
+        let track = playing || self.track_view();
+        if self.section == PLAYLISTS && !track {
+            self.media = crate::media::Media::default();
+            return;
+        }
         let key = format!(
             "{}:{guid}",
             if track { "track" } else { KINDS[self.section] }
@@ -1276,25 +1380,38 @@ impl App {
             }
             2 => self.config.professional = !self.config.professional,
             3 => self.config.english = !self.config.english,
-            4 => return,
+            4 => self.config.remember_location = !self.config.remember_location,
             _ => return,
         }
         self.save();
     }
+    fn set_volume(&mut self, volume: u16) {
+        if let Some(player) = self.player.as_mut() {
+            player.set_volume(volume);
+        }
+        self.config.volume = volume;
+        self.status = format!("音量 / Volume: {volume}%");
+        self.save();
+    }
     fn action(&mut self, action: Action) {
         match action {
-            Action::Seek(fraction) => self.seek_drag = Some(fraction.clamp(0.0, 1.0)),
+            Action::Seek(fraction) => {
+                self.volume_drag = None;
+                self.seek_drag = Some(fraction.clamp(0.0, 1.0));
+            }
             Action::Volume(delta) => {
                 let volume = (self.config.volume.min(100) as i16 + delta).clamp(0, 100) as u16;
-                if let Some(player) = self.player.as_mut()
-                    && let Err(error) = player.adjust_volume(volume as i16 - player.volume as i16)
-                {
-                    self.fail(error);
-                    return;
-                }
-                self.config.volume = volume;
-                self.status = format!("音量 / Volume: {volume}%");
-                self.save();
+                self.volume_drag = None;
+                self.set_volume(volume);
+            }
+            Action::VolumeAt(volume, column) => {
+                self.seek_drag = None;
+                self.volume_drag = Some(VolumeDrag {
+                    column,
+                    initial: self.config.volume.min(100),
+                    click: volume,
+                    preview: None,
+                });
             }
             Action::CycleEffect => {
                 let effect = (self.config.audio_effect + 1) % crate::effects::Effect::COUNT;
@@ -1309,6 +1426,12 @@ impl App {
                 self.save();
             }
             Action::Favorite => self.favorite(),
+            Action::PlaylistNew => self.new_playlist(None),
+            Action::PlaylistRename => self.rename_playlist(),
+            Action::PlaylistDelete => self.delete_playlist_entry(),
+            Action::PlaylistAdd => self.add_to_playlist(),
+            Action::PlaylistPick(index) => self.pick_playlist(index),
+            Action::PlaylistConfirm => self.confirm_playlist(),
             Action::ToggleMode => {
                 self.seek_drag = None;
                 self.config.professional = !self.config.professional;
@@ -1319,6 +1442,7 @@ impl App {
             Action::Connect => self.connect(),
             Action::ToggleRemember => self.toggle_remember(),
             Action::Section(i) => self.switch(i),
+            Action::Back => self.back(),
             Action::Row(i) => {
                 if i < self.view().items.len() {
                     self.view_mut().table.select(Some(i));
@@ -1373,6 +1497,7 @@ impl App {
                 self.adjust_setting(delta);
             }
             Action::CloseModal => {
+                self.playlist_dialog = None;
                 self.settings = None;
                 self.help = false;
                 self.editing = false;
@@ -1394,6 +1519,12 @@ impl App {
                 self.search_input = self.query.clone().unwrap_or_default();
             }
             Action::Refresh => {
+                if self.section == PLAYLISTS
+                    && let Err(error) = self.read_playlists()
+                {
+                    self.fail(error);
+                    return;
+                }
                 self.media_cache.clear();
                 self.media.key.clear();
                 self.load(self.view().page.max(1));
@@ -1401,7 +1532,7 @@ impl App {
         }
     }
     fn back(&mut self) {
-        if self.seek_drag.take().is_some() {
+        if self.seek_drag.take().is_some() || self.volume_drag.take().is_some() {
             return;
         }
 
@@ -1409,16 +1540,13 @@ impl App {
             self.editing = false;
             return;
         }
-        if self.detail.take().is_some() {
+        if self.detail.take().is_some() || self.query.take().is_some() {
             self.cancel();
             self.status.clear();
             self.error = false;
-            return;
-        }
-        if self.query.take().is_some() {
-            self.cancel();
-            self.status.clear();
-            self.error = false;
+            if !self.view().loaded {
+                self.load(1);
+            }
         }
     }
     fn key(&mut self, key: KeyEvent) {
@@ -1427,6 +1555,10 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        if self.playlist_dialog.is_some() {
+            self.playlist_key(key);
             return;
         }
         if self.connected
@@ -1453,7 +1585,13 @@ impl App {
             }));
             return;
         }
-        if key.code == KeyCode::Char('?') && !self.editing && (self.connected || self.help) {
+        if (key.code == KeyCode::Char('?') && (self.connected || self.help)
+            || key.code == KeyCode::F(1)
+                && !self.connected
+                && !self.busy
+                && self.settings.is_none())
+            && !self.editing
+        {
             if self.help {
                 self.help = false;
             } else {
@@ -1476,7 +1614,7 @@ impl App {
             return;
         }
         if let Some(row) = self.settings {
-            let count = if self.connected { 5 } else { 4 };
+            let count = DISCONNECT_SETTING + usize::from(self.connected);
             match key.code {
                 KeyCode::Esc => self.settings = None,
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
@@ -1485,9 +1623,15 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
                     self.settings = Some((row + 1) % count)
                 }
-                KeyCode::Left | KeyCode::Char('h') if row < 4 => self.adjust_setting(-1),
-                KeyCode::Right | KeyCode::Char('l') if row < 4 => self.adjust_setting(1),
-                KeyCode::Enter if row == 4 && self.connected => self.action(Action::Disconnect),
+                KeyCode::Left | KeyCode::Char('h') if row < DISCONNECT_SETTING => {
+                    self.adjust_setting(-1)
+                }
+                KeyCode::Right | KeyCode::Char('l') if row < DISCONNECT_SETTING => {
+                    self.adjust_setting(1)
+                }
+                KeyCode::Enter if row == DISCONNECT_SETTING && self.connected => {
+                    self.action(Action::Disconnect)
+                }
                 KeyCode::Enter => self.adjust_setting(1),
                 _ => {}
             }
@@ -1508,7 +1652,7 @@ impl App {
             }
         }
         if self.connected && !self.editing && key.modifiers.contains(KeyModifiers::ALT) {
-            if let KeyCode::Char(c @ '1'..='5') = key.code {
+            if let KeyCode::Char(c @ '1'..='6') = key.code {
                 self.switch(c as usize - '1' as usize);
                 return;
             }
@@ -1516,13 +1660,16 @@ impl App {
                 self.action(Action::FollowLyrics);
                 return;
             }
-            if matches!(key.code, KeyCode::Left | KeyCode::Right) {
-                self.seek_relative(if key.code == KeyCode::Right {
-                    5.0
-                } else {
-                    -5.0
-                });
-                return;
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                let delta = match key.code {
+                    KeyCode::Left | KeyCode::Char('h' | 'H') => -1,
+                    KeyCode::Right | KeyCode::Char('l' | 'L') => 1,
+                    _ => 0,
+                };
+                if delta != 0 {
+                    self.reorder_category(delta);
+                    return;
+                }
             }
         }
 
@@ -1646,14 +1793,26 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::PageUp => self.page(false),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::PageDown => self.page(true),
-            KeyCode::Tab => self.switch((self.section + 1) % KINDS.len()),
-            KeyCode::BackTab => self.switch((self.section + KINDS.len() - 1) % KINDS.len()),
-            KeyCode::Char(c @ '1'..='5') => self.switch(c as usize - '1' as usize),
+            KeyCode::Tab => {
+                self.switch(self.category_order[(self.category_position() + 1) % KINDS.len()])
+            }
+            KeyCode::BackTab => self.switch(
+                self.category_order[(self.category_position() + KINDS.len() - 1) % KINDS.len()],
+            ),
+            KeyCode::Char(c @ '1'..='6') => self.switch(c as usize - '1' as usize),
             KeyCode::Char('r' | 'R') => self.action(Action::Refresh),
             KeyCode::Char('/') => self.action(Action::Search),
             KeyCode::Char('e' | 'E') => self.action(Action::CycleEffect),
             KeyCode::Char('o' | 'O') => self.action(Action::CycleMode),
             KeyCode::Char('f' | 'F') => self.action(Action::Favorite),
+            KeyCode::Char('a' | 'A') => self.action(Action::PlaylistAdd),
+            KeyCode::Char('n' | 'N') if self.section == PLAYLISTS && self.detail.is_none() => {
+                self.action(Action::PlaylistNew);
+            }
+            KeyCode::Char('c' | 'C') => self.action(Action::PlaylistRename),
+            KeyCode::Delete | KeyCode::Char('d' | 'D') if key.kind == KeyEventKind::Press => {
+                self.action(Action::PlaylistDelete);
+            }
             KeyCode::Char(' ') => self.toggle_audio(),
             KeyCode::Char('s' | 'S') => self.action(Action::Stop),
             KeyCode::Char('[') => self.adjacent_track(-1),
@@ -1673,24 +1832,37 @@ impl App {
                     .collect();
                 if !self.connected && !self.busy && self.focus < 3 {
                     self.fields[self.focus].push_str(&value);
+                } else if let Some(PlaylistDialog::Name { input, .. }) = &mut self.playlist_dialog {
+                    input.push_str(&value);
                 } else if self.editing {
                     self.search_input.push_str(&value);
                 }
             }
             Event::Mouse(mouse)
-                if self.seek_drag.is_some()
+                if (self.seek_drag.is_some() || self.volume_drag.is_some())
                     && matches!(
                         mouse.kind,
                         MouseEventKind::Drag(MouseButton::Left)
                             | MouseEventKind::Up(MouseButton::Left)
                     ) =>
             {
-                if let Some(rect) = self.seek_rect {
-                    let fraction = (mouse.column.saturating_sub(rect.x) as f64
-                        / rect.width.saturating_sub(1).max(1) as f64)
-                        .clamp(0.0, 1.0);
+                let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
+                if let Some(drag) = self.volume_drag.as_mut() {
+                    let offset = i32::from(mouse.column) - i32::from(drag.column);
+                    if offset != 0 || drag.preview.is_some() {
+                        // Allow fine adjustments beyond the five visible cells.
+                        drag.preview =
+                            Some((i32::from(drag.initial) + offset * 5).clamp(0, 100) as u16);
+                    }
+                    if released {
+                        let volume = drag.preview.unwrap_or(drag.click);
+                        self.volume_drag = None;
+                        self.set_volume(volume);
+                    }
+                } else if let Some(rect) = self.seek_rect {
+                    let fraction = bar_fraction(rect, mouse.column);
                     self.seek_drag = Some(fraction);
-                    if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    if released {
                         self.seek_drag = None;
                         if let Some(player) = &mut self.player
                             && let Err(e) = player.seek(fraction)
@@ -1726,6 +1898,15 @@ impl App {
                         }
                     }
                 }
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                    if self.playlist_dialog.is_some() =>
+                {
+                    self.move_playlist_picker(if mouse.kind == MouseEventKind::ScrollDown {
+                        1
+                    } else {
+                        -1
+                    });
+                }
                 MouseEventKind::ScrollDown
                     if self.connected && self.settings.is_none() && !self.help =>
                 {
@@ -1755,6 +1936,11 @@ impl App {
             _ => {}
         }
     }
+}
+
+pub fn bar_fraction(rect: Rect, column: u16) -> f64 {
+    let span = rect.width.saturating_sub(1).max(1);
+    f64::from(column.saturating_sub(rect.x).min(span)) / f64::from(span)
 }
 
 struct TerminalGuard;
@@ -1802,6 +1988,7 @@ pub fn run(allow_http: bool) -> Result<()> {
     let mut last_tick = Instant::now();
     while !app.quit {
         app.replies();
+        app.checkpoint_location();
         app.refresh_media();
         terminal
             .draw(|frame| crate::ui::draw(frame, &mut app))

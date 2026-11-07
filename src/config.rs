@@ -1,4 +1,6 @@
+use crate::app::BrowseLocation;
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, io::Write};
 use termune::Result;
 
 #[derive(Serialize, Deserialize)]
@@ -16,6 +18,9 @@ pub struct Config {
     pub volume: u16,
     pub audio_effect: usize,
     pub last_category: String,
+    pub remember_location: bool,
+    pub browse_locations: BTreeMap<String, BrowseLocation>,
+    pub category_order: Vec<String>,
     pub playback_mode: crate::queue::Mode,
     #[serde(skip)]
     pub path_override: Option<std::path::PathBuf>,
@@ -35,6 +40,9 @@ impl Default for Config {
             volume: 100,
             audio_effect: 0,
             last_category: "album".into(),
+            remember_location: true,
+            browse_locations: BTreeMap::new(),
+            category_order: Vec::new(),
             playback_mode: crate::queue::Mode::default(),
             path_override: None,
         }
@@ -42,7 +50,7 @@ impl Default for Config {
 }
 
 impl Config {
-    fn path() -> Result<std::path::PathBuf> {
+    pub(crate) fn path() -> Result<std::path::PathBuf> {
         Ok(directories::ProjectDirs::from("", "", "termune")
             .ok_or("无法确定配置目录")?
             .config_dir()
@@ -76,9 +84,16 @@ impl Config {
             .clone()
             .map(Ok)
             .unwrap_or_else(Self::path)?;
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|_| "创建配置目录失败")?;
+        let directory = path.parent().unwrap();
+        std::fs::create_dir_all(directory).map_err(|_| "创建配置目录失败")?;
         let text = toml::to_string_pretty(self).map_err(|_| "配置编码失败")?;
-        std::fs::write(path, text).map_err(|_| "保存 config.toml 失败".into())
+        let mut staging =
+            tempfile::NamedTempFile::new_in(directory).map_err(|_| "保存 config.toml 失败")?;
+        staging
+            .write_all(text.as_bytes())
+            .map_err(|_| "保存 config.toml 失败")?;
+        staging.persist(path).map_err(|_| "保存 config.toml 失败")?;
+        Ok(())
     }
     pub fn text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
         if self.english { en } else { zh }

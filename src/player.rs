@@ -8,7 +8,6 @@ pub struct Player {
     decoder: crate::audio::Decoder,
     pub title: String,
     pub paused: bool,
-    pub volume: u16,
     pub timeline: Timeline,
 }
 impl Player {
@@ -23,17 +22,14 @@ impl Player {
             decoder,
             title,
             paused: false,
-            volume,
             timeline: Timeline::default(),
         })
     }
     pub fn set_effect(&mut self, effect: usize) {
         self.decoder.set_effect(effect);
     }
-    pub fn adjust_volume(&mut self, delta: i16) -> Result<()> {
-        self.volume = (self.volume as i16 + delta).clamp(0, 100) as u16;
-        self.decoder.volume(self.volume);
-        Ok(())
+    pub fn set_volume(&mut self, volume: u16) {
+        self.decoder.volume(volume.min(100));
     }
     pub fn toggle(&mut self) -> Result<()> {
         self.paused = !self.paused;

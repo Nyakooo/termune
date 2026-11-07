@@ -2719,6 +2719,7 @@ dependencies = [
  "sha2",
  "symphonia",
  "symphonia-adapter-libopus",
+ "tempfile",
  "toml",
  "url",
 ]
