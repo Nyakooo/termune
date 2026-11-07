@@ -15,6 +15,7 @@ pub struct Config {
     pub layout_version: u8,
     pub professional: bool,
     pub auto_login: bool,
+    pub allow_lan_http: bool,
     pub volume: u16,
     pub audio_effect: usize,
     #[serde(default)]
@@ -39,6 +40,7 @@ impl Default for Config {
             layout_version: 1,
             professional: true,
             auto_login: false,
+            allow_lan_http: false,
             volume: 100,
             audio_effect: 0,
             effect_version: Some(1),

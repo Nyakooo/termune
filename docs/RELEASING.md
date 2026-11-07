@@ -27,7 +27,7 @@
    git push origin v0.1.3
    ```
 
-4. 打开 Actions 页面自行查看结果。六个平台及安装脚本测试全部成功后自动创建 Release，无需本地打包或提供 PAT。工作流使用自带 `GITHUB_TOKEN`，只有发布 job 有 `contents: write` 权限。
+4. 打开 Actions 页面自行查看结果。推送 `v*` 标签会运行发布工作流。普通分支推送由 PR 检查或手动运行验证，发布时只跑标签这一套构建。六个平台及安装脚本测试全部成功后自动创建 Release，无需本地打包或提供 PAT。工作流使用自带 `GITHUB_TOKEN`，只有发布 job 有 `contents: write` 权限。
 
 Linux / macOS 输出 `termune-<target>.tar.gz` 和无扩展名的 `termune-<target>`，Windows 输出 `termune-<target>.zip` 和 `termune-<target>.exe`。包内目录为 `termune-v<version>-<target>`，包含程序、文档、安装脚本和版本记录。汇总阶段要求十二份资源全部存在、非空且无意外文件，才生成 `SHA256SUMS` 并上传。SHA256 用于传输完整性检查，不等于独立数字签名。
 

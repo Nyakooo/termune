@@ -24,7 +24,8 @@ pub const KINDS: [&str; 6] = ["album", "artist", "genre", "track", "favorite", "
 pub const TRACKS: usize = 3;
 pub const FAVORITES: usize = 4;
 pub const PLAYLISTS: usize = 5;
-pub const DISCONNECT_SETTING: usize = 5;
+pub const LAN_HTTP_SETTING: usize = 5;
+pub const DISCONNECT_SETTING: usize = LAN_HTTP_SETTING + 1;
 
 mod location;
 pub use location::BrowseLocation;
@@ -116,7 +117,7 @@ enum Reply {
 struct Connected {
     server: String,
     username: String,
-    route: String,
+    route: termune::Candidate,
     remembered: bool,
     warning: Option<String>,
 }
@@ -212,7 +213,7 @@ pub struct App {
     pub restoring: bool,
     pub server: String,
     pub username: String,
-    pub route: String,
+    pub route: Option<termune::Candidate>,
     pub section: usize,
     pub category_order: [usize; KINDS.len()],
     pub views: [View; KINDS.len()],
@@ -234,7 +235,7 @@ pub struct App {
     pub hits: Vec<(Rect, Action)>,
     last_click: Option<(u16, u16, Instant)>,
     pub tick: usize,
-    pub allow_http: bool,
+    allow_http_flag: bool,
     pub player: Option<crate::player::Player>,
     pub audio_loading: Option<String>,
     pub media: crate::media::Media,
@@ -512,15 +513,7 @@ fn authenticate(
                 .unwrap_or("Feiniu NAS"),
         ),
         username: clean(user["name"].as_str().unwrap_or("Music user")),
-        route: format!(
-            "{} · {}",
-            connection.candidate.base.scheme().to_uppercase(),
-            if connection.candidate.relay {
-                "FN Connect"
-            } else {
-                "Direct"
-            }
-        ),
+        route: connection.candidate,
         remembered,
         warning,
     };
@@ -569,7 +562,7 @@ impl App {
                 id,
                 fn_id: self.config.fn_id.clone(),
                 username: self.config.username.clone(),
-                allow_http: self.allow_http,
+                allow_http: self.allow_lan_http(),
             })
             .is_err()
         {
@@ -640,7 +633,7 @@ impl App {
             restoring: false,
             server: String::new(),
             username: String::new(),
-            route: String::new(),
+            route: None,
             section,
             category_order,
             views: std::array::from_fn(|_| View::default()),
@@ -662,7 +655,7 @@ impl App {
             hits: Vec::new(),
             last_click: None,
             tick: 0,
-            allow_http,
+            allow_http_flag: allow_http,
             player: None,
             audio_loading: None,
             media: crate::media::Media::default(),
@@ -689,6 +682,9 @@ impl App {
     }
     pub fn text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
         self.config.text(zh, en)
+    }
+    pub fn allow_lan_http(&self) -> bool {
+        self.allow_http_flag || self.config.allow_lan_http
     }
     pub fn view(&self) -> &View {
         if self.detail.is_some() {
@@ -809,7 +805,7 @@ impl App {
                 fn_id,
                 username,
                 password,
-                allow_http: self.allow_http,
+                allow_http: self.allow_lan_http(),
                 remember: self.remember,
             })
             .is_err()
@@ -836,6 +832,7 @@ impl App {
         self.cancel();
         let _ = self.tx.send(Command::Logout);
         self.connected = false;
+        self.route = None;
         self.views = std::array::from_fn(|_| View::default());
         self.playlists.clear();
         self.playlist_dialog = None;
@@ -883,7 +880,7 @@ impl App {
                         self.restoring = false;
                         self.server = connected.server;
                         self.username = connected.username;
-                        self.route = connected.route;
+                        self.route = Some(connected.route);
                         self.remember = connected.remembered;
                         self.config.auto_login = connected.remembered;
                         self.notice = connected
@@ -1424,6 +1421,7 @@ impl App {
             2 => self.config.professional = !self.config.professional,
             3 => self.config.english = !self.config.english,
             4 => self.config.remember_location = !self.config.remember_location,
+            LAN_HTTP_SETTING => self.config.allow_lan_http = !self.config.allow_lan_http,
             _ => return,
         }
         self.save();

@@ -14,6 +14,14 @@ fn app() -> App {
     App::with_config(config, String::new(), false)
 }
 
+fn relay_route() -> termune::Candidate {
+    termune::Candidate {
+        base: "https://relay.example.test".parse().unwrap(),
+        relay: true,
+        label: "FN Connect 中继",
+    }
+}
+
 #[test]
 #[ignore = "exports layout previews with clearly labeled fixture data"]
 fn export_ui_previews() {
@@ -25,7 +33,7 @@ fn export_ui_previews() {
     app.connected = true;
     app.server = "布局测试 NAS".into();
     app.username = "preview".into();
-    app.route = "HTTPS · FN Connect".into();
+    app.route = Some(relay_route());
     app.config.professional = true;
     app.views[3]=View{items:(0..12).map(|i|json!({"guid":format!("fixture-{i}"),"title":(["他的睫毛","晴天","七里香","夜曲","一路向北","稻香"][i%6]),"artists":[{"name":"周杰伦"}],"album":{"name":"叶惠美"},"audioSpec":{"format":"FLAC"}})).collect(),total:440,page:1,loaded:true,table:TableState::default().with_selected(1)};
     app.show_status("布局预览 · 测试数据".into(), false);
@@ -79,6 +87,40 @@ fn render(app: &mut App, width: u16, height: u16) -> String {
 }
 fn key(app: &mut App, code: KeyCode) {
     app.key(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+#[test]
+fn header_displays_the_selected_connection_route() {
+    let mut app = app();
+    app.connected = true;
+    app.server = "Test NAS".into();
+    app.username = "listener".into();
+    app.route = Some(relay_route());
+    let screen = render(&mut app, 100, 30);
+    let metadata = screen.lines().nth(1).unwrap();
+    assert!(metadata.contains("Test NAS · listener"));
+    assert!(metadata.contains("FN Connect 中继"));
+    assert!(!metadata.contains("relay.example.test"));
+
+    let data = json!({"ipv4": ["192.168.1.42"]});
+    app.route = termune::candidates(&data, false).into_iter().next();
+    let narrow = render(&mut app, 36, 30);
+    assert!(
+        narrow
+            .lines()
+            .nth(2)
+            .unwrap()
+            .contains("局域网 · 192.168.1.42")
+    );
+    app.config.english = true;
+    let screen = render(&mut app, 100, 30);
+    assert!(
+        screen
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("LAN · 192.168.1.42")
+    );
 }
 
 #[test]
@@ -215,6 +257,44 @@ fn login_button_click_only_submits_inside_the_button() {
             .iter()
             .any(|(_, action)| matches!(action, Action::Connect | Action::ToggleRemember))
     );
+}
+
+#[test]
+fn lan_http_setting_is_saved_and_used_for_login_and_restore() {
+    let mut app = app();
+    assert!(!app.allow_lan_http());
+    app.action(Action::Settings);
+    key(&mut app, KeyCode::Up);
+    assert_eq!(app.settings, Some(LAN_HTTP_SETTING));
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("局域网 HTTP"));
+    assert!(screen.contains("HTTP 明文传输凭据"));
+    key(&mut app, KeyCode::Enter);
+
+    let path = app.config.path_override.as_ref().unwrap();
+    let config: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let mut app = App::with_config(config, String::new(), false);
+    assert!(app.allow_lan_http());
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    app.fields = ["test-id".into(), "listener".into(), "fixture".into()];
+    app.connect();
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Login {
+            allow_http: true,
+            ..
+        })
+    ));
+    app.restore();
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Restore {
+            allow_http: true,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -810,7 +890,7 @@ fn restored_session_enters_library_directly_and_escape_cancels_restore() {
             Ok(Connected {
                 server: "test NAS".into(),
                 username: "tester".into(),
-                route: "HTTPS".into(),
+                route: relay_route(),
                 remembered: true,
                 warning: None,
             }),
@@ -1086,7 +1166,7 @@ fn playlist_workflow_restores_song_combinations_and_isolates_accounts() {
             Ok(Connected {
                 server: "test NAS".into(),
                 username: "listener".into(),
-                route: "HTTPS".into(),
+                route: relay_route(),
                 remembered: true,
                 warning: None,
             }),
@@ -1286,7 +1366,7 @@ fn remembers_library_page_and_track_after_reconnecting() {
             Ok(Connected {
                 server: "test NAS".into(),
                 username: "listener".into(),
-                route: "HTTPS".into(),
+                route: relay_route(),
                 remembered: true,
                 warning: None,
             }),
@@ -1313,7 +1393,7 @@ fn remembers_library_page_and_track_after_reconnecting() {
     app.action(Action::Settings);
     let settings = render(&mut app, 100, 32);
     assert!(settings.contains("记忆位置"));
-    app.action(Action::ChangeSetting(DISCONNECT_SETTING - 1, 1));
+    app.action(Action::ChangeSetting(4, 1));
     assert!(!app.config.remember_location);
     let config: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert!(!config.remember_location);

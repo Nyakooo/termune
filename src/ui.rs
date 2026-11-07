@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, App, DISCONNECT_SETTING, FAVORITES, PLAYLISTS, PlaylistDialog, artists, bar_fraction,
-    clean, name,
+    Action, App, DISCONNECT_SETTING, FAVORITES, LAN_HTTP_SETTING, PLAYLISTS, PlaylistDialog,
+    artists, bar_fraction, clean, name,
 };
 use ratatui::{
     Frame,
@@ -285,6 +285,21 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         playlist_dialog(f, a, area, p);
     }
 }
+fn route_label(a: &App, route: &termune::Candidate) -> String {
+    if route.relay {
+        return a.text("FN Connect 中继", "FN Connect relay").into();
+    }
+    let kind = match route.label {
+        "局域网 IPv4" | "局域网 IPv6" => a.text("局域网", "LAN"),
+        "公网 IPv4" | "公网 IPv6" => a.text("公网直连", "Public IP"),
+        "DDNS HTTPS" => "DDNS",
+        _ => a.text("直连", "Direct"),
+    };
+    match route.base.host_str() {
+        Some(host) => format!("{kind} · {host}"),
+        None => kind.into(),
+    }
+}
 fn header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     let cols = Layout::horizontal([
         Constraint::Min(10),
@@ -329,6 +344,15 @@ fn header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         } else {
             format!("{} · {}", a.server, a.username)
         };
+        if let Some(route) = &a.route {
+            let label = route_label(a, route);
+            let combined = format!("{meta}   /   {label}");
+            if Line::from(combined.as_str()).width() <= r.width as usize {
+                text(f, line(r, 1), combined, p.dim);
+                return;
+            }
+            text(f, line(r, 2), label, p.dim);
+        }
         text(f, line(r, 1), meta, p.dim);
     }
 }
@@ -474,7 +498,8 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
     if !app.busy {
         app.hits.push((checkbox_area, Action::ToggleRemember));
     }
-    let hint = if app.allow_http {
+    let allow_http = app.allow_lan_http();
+    let hint = if allow_http {
         app.text("HTTP 未加密，凭据可能泄露", "HTTP may expose credentials")
     } else {
         app.text("仅在系统凭据库保存 Token", "Token stored in system vault")
@@ -483,7 +508,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
         frame,
         line(rows[5], 1),
         format!("    {hint}"),
-        if app.allow_http { Color::Yellow } else { p.dim },
+        if allow_http { Color::Yellow } else { p.dim },
     );
 
     let button = Rect {
@@ -1226,7 +1251,13 @@ fn inspector(f: &mut Frame, a: &App, r: Rect, p: Palette, overview: bool) {
         a.text("连接线路", "Connection"),
         Style::default().fg(p.secondary),
     )));
-    lines.push(Line::from(clean(&a.route)));
+    if let Some(route) = &a.route {
+        lines.push(Line::from(format!(
+            "{} · {}",
+            route.base.scheme().to_ascii_uppercase(),
+            route_label(a, route)
+        )));
+    }
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -1235,7 +1266,7 @@ fn inspector(f: &mut Frame, a: &App, r: Rect, p: Palette, overview: bool) {
     );
 }
 fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
-    let modal = center(r, 64, 19);
+    let modal = center(r, 64, 20);
     f.render_widget(Clear, modal);
     let block = pane(a.text("设置", "Settings").into(), p, true);
     let inner = inset(block.inner(modal), 2, 1);
@@ -1254,6 +1285,7 @@ fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         a.text("显示", "Display"),
         a.text("语言", "Language"),
         a.text("记忆位置", "Remember"),
+        a.text("局域网 HTTP", "LAN HTTP"),
         a.text("账户", "Account"),
     ]
     .map(str::to_owned);
@@ -1281,6 +1313,12 @@ fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         .to_owned(),
         if a.config.remember_location {
             a.text("开启", "On")
+        } else {
+            a.text("关闭", "Off")
+        }
+        .to_owned(),
+        if a.config.allow_lan_http {
+            a.text("允许", "Allow")
         } else {
             a.text("关闭", "Off")
         }
@@ -1322,9 +1360,20 @@ fn settings(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             a.hits.push((cols[2], Action::Disconnect));
         }
     }
+    if selected == LAN_HTTP_SETTING {
+        f.render_widget(
+            Paragraph::new(a.text(
+                "HTTP 明文传输凭据，仅用于可信局域网。下次连接生效。",
+                "HTTP sends credentials in cleartext. Trusted LAN only. Applies on reconnect.",
+            ))
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Yellow)),
+            Rect::new(inner.x, inner.y + 13, inner.width, 2),
+        );
+    }
     text(
         f,
-        line(inner, 12),
+        line(inner, 15),
         a.text(
             "↑↓/jk 选择  ←→/hl 更改  Enter 确认  Esc 返回",
             "↑↓/jk Select  ←→/hl Change  Enter Apply  Esc Back",
