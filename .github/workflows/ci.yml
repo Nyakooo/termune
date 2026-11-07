@@ -75,7 +75,7 @@ jobs:
       - name: Validate version and packaging tests
         run: |
           python scripts/package_release.py --check
-          python -m unittest discover -s tests -p 'package_release_test.py'
+          python -m unittest discover -s tests -p '*_test.py'
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
@@ -110,6 +110,13 @@ jobs:
           path: dist
       - name: Validate complete assets and generate SHA256SUMS
         run: python3 scripts/package_release.py --checksums
+      - name: Extract notes for this release only
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/extract_release_notes.py \
+            --tag "$RELEASE_TAG" \
+            --output "$RUNNER_TEMP/release-notes.md"
       - name: Publish archives, update binaries and checksums
         shell: bash
         env:
@@ -119,9 +126,9 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" dist/* --clobber
-            gh release edit "$RELEASE_TAG" --draft=false --notes-file RELEASE_NOTES.md
+            gh release edit "$RELEASE_TAG" --draft=false --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            args=( --verify-tag --title "Termune $RELEASE_TAG" --notes-file RELEASE_NOTES.md )
+            args=( --verify-tag --title "Termune $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" )
             if [[ "$RELEASE_TAG" == *-* ]]; then args+=( --prerelease ); fi
             gh release create "$RELEASE_TAG" "${args[@]}" dist/*
           fi
