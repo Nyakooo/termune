@@ -1,0 +1,60 @@
+name: Sync published release notes
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Keep each Release page version-specific
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       contains(github.event.head_commit.message, '[sync-release-notes]'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rewrite existing Release descriptions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release list --limit 1000 --json tagName,isDraft \
+            | jq -r '.[] | select(.isDraft == false) | .tagName' \
+            > "$RUNNER_TEMP/release-tags.txt"
+
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            echo "::group::Sync $tag"
+
+            if ! git show "$tag:RELEASE_NOTES.md" > "$RUNNER_TEMP/source-notes.md"; then
+              echo "Skipping $tag: no RELEASE_NOTES.md at this tag"
+              echo "::endgroup::"
+              continue
+            fi
+
+            if ! python3 scripts/extract_release_notes.py \
+              --tag "$tag" \
+              --source "$RUNNER_TEMP/source-notes.md" \
+              --output "$RUNNER_TEMP/release-notes.md"; then
+              echo "Skipping $tag: no unique matching version section"
+              echo "::endgroup::"
+              continue
+            fi
+
+            gh release edit "$tag" --notes-file "$RUNNER_TEMP/release-notes.md"
+            echo "Updated $tag"
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/release-tags.txt"
