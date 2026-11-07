@@ -331,7 +331,7 @@ mod tests {
     fn live_switch_changes_pcm_beyond_simple_volume_gain() {
         let shared = Shared::new(48000, 0, 100);
         let mut dsp = Processor::new(48000, 0, 100);
-        for effect in 1..5 {
+        for effect in 1..crate::effects::Effect::COUNT {
             shared.effect.store(effect, Ordering::Relaxed);
             let mut source_energy = 0.0f64;
             let mut output_energy = 0.0f64;

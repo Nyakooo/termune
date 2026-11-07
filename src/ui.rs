@@ -1448,10 +1448,10 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             a.text("播放队列上一首 / 下一首", "Previous / next track in queue"),
         ),
         (
-            "E",
+            "E / Shift+E",
             a.text(
-                "音效：原声 / 耳机空间 / 低音 / 现场 / Livehouse",
-                "Effects: original / headphone / bass / live / Livehouse",
+                "音效：原声 / 低音 / 现场 / Livehouse / 律动 / 空间3D",
+                "Effects: original / bass / live / Livehouse / club / 3D space",
             ),
         ),
         ("S", a.text("停止播放", "Stop playback")),

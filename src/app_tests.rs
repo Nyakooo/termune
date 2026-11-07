@@ -843,7 +843,7 @@ fn library_tabs_have_natural_width_and_remember_category() {
 }
 
 #[test]
-fn effect_shortcut_cycles_five_presets_and_saves_selection() {
+fn effect_shortcut_cycles_all_presets_and_saves_selection() {
     let mut app = app();
     app.connected = true;
     for index in 1..=crate::effects::Effect::COUNT {
@@ -853,6 +853,17 @@ fn effect_shortcut_cycles_five_presets_and_saves_selection() {
             index % crate::effects::Effect::COUNT
         );
     }
+}
+
+#[test]
+fn shift_e_cycles_effects_backwards() {
+    let mut app = app();
+    app.connected = true;
+    app.config.audio_effect = 0;
+    app.key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT));
+    assert_eq!(app.config.audio_effect, crate::effects::Effect::COUNT - 1);
+    app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+    assert_eq!(app.config.audio_effect, 0);
 }
 
 #[test]

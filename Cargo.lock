@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "termune"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "cpal",
  "crossterm",

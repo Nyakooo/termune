@@ -7,19 +7,21 @@ use std::f32::consts::PI;
 #[repr(usize)]
 pub enum Effect {
     Original,
-    Spatial,
     Bass,
     Live,
     Livehouse,
+    Club,
+    Space3D,
 }
 impl Effect {
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 6;
     pub fn from_index(index: usize) -> Self {
         match index {
-            1 => Self::Spatial,
-            2 => Self::Bass,
-            3 => Self::Live,
-            4 => Self::Livehouse,
+            1 => Self::Bass,
+            2 => Self::Live,
+            3 => Self::Livehouse,
+            4 => Self::Club,
+            5 => Self::Space3D,
             _ => Self::Original,
         }
     }
@@ -27,13 +29,15 @@ impl Effect {
         match (self, english) {
             (Self::Original, false) => "原声",
             (Self::Original, true) => "Original",
-            (Self::Spatial, false) => "耳机空间",
-            (Self::Spatial, true) => "Headphone",
             (Self::Bass, false) => "醇厚低音",
             (Self::Bass, true) => "Warm bass",
             (Self::Live, false) => "现场",
             (Self::Live, true) => "Live stage",
             (Self::Livehouse, _) => "Livehouse",
+            (Self::Club, false) => "律动",
+            (Self::Club, true) => "Club",
+            (Self::Space3D, false) => "空间3D",
+            (Self::Space3D, true) => "3D space",
         }
     }
 }
@@ -44,10 +48,15 @@ struct Biquad {
     z: [[f32; 2]; 2],
 }
 impl Biquad {
+    fn omega(rate: f32, frequency: f32) -> f32 {
+        // Keep filter poles away from Nyquist even on low-rate output devices.
+        2.0 * PI * frequency.min(rate * 0.45) / rate
+    }
+
     // RBJ low shelf, slope S=1. Negative gain also supported.
     fn shelf(rate: f32, frequency: f32, db: f32) -> Self {
         let a = 10.0f32.powf(db / 40.0);
-        let w = 2.0 * PI * frequency / rate;
+        let w = Self::omega(rate, frequency);
         let c = w.cos();
         let alpha = w.sin() / 2.0 * 2.0f32.sqrt();
         let t = 2.0 * a.sqrt() * alpha;
@@ -64,6 +73,72 @@ impl Biquad {
             ],
             z: [[0.0; 2]; 2],
         }
+    }
+    // RBJ peaking EQ.
+    fn peaking(rate: f32, frequency: f32, q: f32, db: f32) -> Self {
+        let a = 10.0f32.powf(db / 40.0);
+        let w = Self::omega(rate, frequency);
+        let alpha = w.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        Self {
+            b: [
+                (1.0 + alpha * a) / a0,
+                -2.0 * w.cos() / a0,
+                (1.0 - alpha * a) / a0,
+            ],
+            a: [-2.0 * w.cos() / a0, (1.0 - alpha / a) / a0],
+            z: [[0.0; 2]; 2],
+        }
+    }
+    // RBJ high shelf, slope S=1.
+    fn high_shelf(rate: f32, frequency: f32, db: f32) -> Self {
+        let a = 10.0f32.powf(db / 40.0);
+        let w = Self::omega(rate, frequency);
+        let c = w.cos();
+        let alpha = w.sin() / 2.0 * 2.0f32.sqrt();
+        let t = 2.0 * a.sqrt() * alpha;
+        let a0 = (a + 1.0) - (a - 1.0) * c + t;
+        Self {
+            b: [
+                a * ((a + 1.0) + (a - 1.0) * c + t) / a0,
+                -2.0 * a * ((a - 1.0) + (a + 1.0) * c) / a0,
+                a * ((a + 1.0) + (a - 1.0) * c - t) / a0,
+            ],
+            a: [
+                2.0 * ((a - 1.0) - (a + 1.0) * c) / a0,
+                ((a + 1.0) - (a - 1.0) * c - t) / a0,
+            ],
+            z: [[0.0; 2]; 2],
+        }
+    }
+    // RBJ high-pass with Q = 1/sqrt(2).
+    fn highpass(rate: f32, frequency: f32) -> Self {
+        let w = Self::omega(rate, frequency);
+        let c = w.cos();
+        let alpha = w.sin() / 2.0f32.sqrt();
+        let a0 = 1.0 + alpha;
+        Self {
+            b: [(1.0 + c) / 2.0 / a0, -(1.0 + c) / a0, (1.0 + c) / 2.0 / a0],
+            a: [-2.0 * c / a0, (1.0 - alpha) / a0],
+            z: [[0.0; 2]; 2],
+        }
+    }
+    fn lowpass(rate: f32, frequency: f32) -> Self {
+        let w = Self::omega(rate, frequency);
+        let c = w.cos();
+        let alpha = w.sin() / 2.0f32.sqrt();
+        let a0 = 1.0 + alpha;
+        Self {
+            b: [(1.0 - c) / 2.0 / a0, (1.0 - c) / a0, (1.0 - c) / 2.0 / a0],
+            a: [-2.0 * c / a0, (1.0 - alpha) / a0],
+            z: [[0.0; 2]; 2],
+        }
+    }
+    fn process_mono(&mut self, input: f32) -> f32 {
+        let y = self.b[0] * input + self.z[0][0];
+        self.z[0][0] = self.b[1] * input - self.a[0] * y + self.z[0][1];
+        self.z[0][1] = self.b[2] * input - self.a[1] * y;
+        y
     }
     fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
         std::array::from_fn(|c| {
@@ -140,8 +215,134 @@ impl Room {
         output
     }
 }
+struct Compressor {
+    threshold: f32,
+    ratio: f32,
+    attack: f32,
+    release: f32,
+    makeup: f32,
+    envelope: f32,
+}
+impl Compressor {
+    fn new(
+        rate: f32,
+        threshold_db: f32,
+        ratio: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        makeup_db: f32,
+    ) -> Self {
+        Self {
+            threshold: 10.0f32.powf(threshold_db / 20.0),
+            ratio,
+            attack: 1.0 - (-1.0 / (rate * attack_ms / 1000.0)).exp(),
+            release: 1.0 - (-1.0 / (rate * release_ms / 1000.0)).exp(),
+            makeup: 10.0f32.powf(makeup_db / 20.0),
+            envelope: 0.0,
+        }
+    }
+    fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
+        let peak = input[0].abs().max(input[1].abs());
+        let coeff = if peak > self.envelope {
+            self.attack
+        } else {
+            self.release
+        };
+        self.envelope += coeff * (peak - self.envelope);
+        let env = self.envelope.max(1e-6);
+        let gain = if env > self.threshold {
+            (self.threshold / env).powf(1.0 - 1.0 / self.ratio)
+        } else {
+            1.0
+        };
+        input.map(|v| v * gain * self.makeup)
+    }
+}
+// Psychoacoustic bass enhancement: rectify the sub band and fold its harmonics
+// back in so small speakers can reproduce the low end.
+struct BassEnhancer {
+    low: Biquad,
+    high: Biquad,
+    smooth: Biquad,
+    amount: f32,
+}
+impl BassEnhancer {
+    fn new(rate: f32) -> Self {
+        Self {
+            low: Biquad::lowpass(rate, 90.0),
+            high: Biquad::highpass(rate, 100.0),
+            smooth: Biquad::lowpass(rate, 380.0),
+            amount: 0.12,
+        }
+    }
+    fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
+        let mono = (input[0] + input[1]) * 0.5;
+        let low = self.low.process_mono(mono);
+        let harmonics = self.smooth.process_mono(self.high.process_mono(low.abs()));
+        [
+            input[0] + harmonics * self.amount,
+            input[1] + harmonics * self.amount,
+        ]
+    }
+    fn reset(&mut self) {
+        self.low.z = [[0.0; 2]; 2];
+        self.high.z = [[0.0; 2]; 2];
+        self.smooth.z = [[0.0; 2]; 2];
+    }
+}
+// Early-reflection taps plus a slow rotation of the wet field. Reflections are
+// fed mostly from the side signal so the dry vocal/centre image stays stable.
+struct Space {
+    taps: [Delay; 6],
+    tap_gains: [[f32; 2]; 6],
+    phase: f32,
+    phase_step: f32,
+    depth: f32,
+}
+impl Space {
+    fn new(rate: f32) -> Self {
+        let gains = [0.60, 0.50, 0.40, 0.32, 0.24, 0.18];
+        let pans: [f32; 6] = [-0.85, 0.85, -0.60, 0.60, -0.35, 0.35];
+        Self {
+            taps: [0.0073, 0.0119, 0.0173, 0.0241, 0.0313, 0.0419]
+                .map(|seconds| Delay::new((rate * seconds) as usize)),
+            tap_gains: std::array::from_fn(|i| {
+                [
+                    ((1.0 - pans[i]) * 0.5).sqrt() * gains[i],
+                    ((1.0 + pans[i]) * 0.5).sqrt() * gains[i],
+                ]
+            }),
+            phase: 0.0,
+            phase_step: 0.10 / rate,
+            depth: 0.55,
+        }
+    }
+    fn process(&mut self, mid: f32, side: f32) -> [f32; 2] {
+        let feed = mid * 0.22 + side * 1.15;
+        let mut output = [0.0; 2];
+        for (tap, [left, right]) in self.taps.iter_mut().zip(self.tap_gains) {
+            let delayed = tap.read();
+            tap.write(feed);
+            output[0] += delayed * left;
+            output[1] += delayed * right;
+        }
+        self.phase = (self.phase + self.phase_step) % 1.0;
+        output
+    }
+    fn angle(&self) -> f32 {
+        (self.phase * 2.0 * PI).sin() * self.depth
+    }
+}
+fn rotate([left, right]: [f32; 2], angle: f32) -> [f32; 2] {
+    let (sin, cos) = angle.sin_cos();
+    [left * cos + right * sin, right * cos - left * sin]
+}
 struct Profile {
-    eq: Biquad,
+    eq: Vec<Biquad>,
+    side_hp: Vec<Biquad>,
+    bass: Option<BassEnhancer>,
+    compressor: Option<Compressor>,
+    space: Option<Space>,
     rooms: [Room; 2],
     cross_delay: [Delay; 2],
     cross_lp: [f32; 2],
@@ -153,25 +354,113 @@ struct Profile {
 }
 impl Profile {
     fn new(effect: Effect, rate: f32) -> Self {
-        let (bass, feedback, wet, crossfeed, width, gain_db) = match effect {
-            Effect::Spatial => (0.0, 0.62, 0.45, 0.30, 1.25, -1.0),
-            Effect::Bass => (7.0, 0.0, 0.0, 0.0, 1.0, -2.0),
-            Effect::Live => (1.0, 0.80, 1.10, 0.0, 1.20, -2.5),
-            Effect::Livehouse => (3.5, 0.57, 0.80, 0.0, 1.08, -2.0),
-            _ => (0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        let (eq, feedback, wet, crossfeed, width, gain_db, side_hp, bass, compressor, space) =
+            match effect {
+                // Sub weight plus harmonic bass so small speakers still feel the low end.
+                Effect::Bass => (
+                    vec![
+                        Biquad::highpass(rate, 30.0),
+                        Biquad::peaking(rate, 65.0, 0.7, 8.0),
+                        Biquad::peaking(rate, 140.0, 1.0, 4.0),
+                        Biquad::peaking(rate, 300.0, 0.8, -2.5),
+                    ],
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    -1.5,
+                    vec![Biquad::highpass(rate, 120.0)],
+                    Some(BassEnhancer::new(rate)),
+                    None,
+                    None,
+                ),
+                Effect::Live => (
+                    vec![Biquad::shelf(rate, 160.0, 1.0)],
+                    0.80,
+                    1.10,
+                    0.0,
+                    1.20,
+                    -2.5,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                ),
+                // Small, tight room: shorter tail, more presence and compression.
+                Effect::Livehouse => (
+                    vec![
+                        Biquad::highpass(rate, 35.0),
+                        Biquad::shelf(rate, 120.0, 4.0),
+                        Biquad::peaking(rate, 380.0, 0.8, -2.0),
+                        Biquad::peaking(rate, 2800.0, 0.8, 2.0),
+                        Biquad::high_shelf(rate, 9000.0, 2.0),
+                    ],
+                    0.42,
+                    0.55,
+                    0.0,
+                    1.12,
+                    -1.5,
+                    vec![Biquad::highpass(rate, 130.0)],
+                    None,
+                    Some(Compressor::new(rate, -18.0, 2.0, 20.0, 180.0, 3.0)),
+                    None,
+                ),
+                // Tight sub, de-mud, vocal presence, air, narrower bass and peak compression.
+                Effect::Club => (
+                    vec![
+                        Biquad::highpass(rate, 30.0),
+                        Biquad::shelf(rate, 70.0, 8.0),
+                        Biquad::peaking(rate, 300.0, 0.8, -3.5),
+                        Biquad::peaking(rate, 4000.0, 0.8, 4.0),
+                        Biquad::high_shelf(rate, 11000.0, 5.0),
+                    ],
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.45,
+                    -1.0,
+                    vec![Biquad::highpass(rate, 200.0); 2],
+                    Some(BassEnhancer::new(rate)),
+                    Some(Compressor::new(rate, -20.0, 2.8, 8.0, 120.0, 5.0)),
+                    None,
+                ),
+                // Strong externalisation: early reflections, head-shadow crossfeed,
+                // side-driven reverb and a slow rotation of the wet field.
+                Effect::Space3D => (
+                    vec![Biquad::highpass(rate, 30.0)],
+                    0.78,
+                    0.72,
+                    0.20,
+                    1.90,
+                    -1.0,
+                    vec![Biquad::highpass(rate, 140.0)],
+                    None,
+                    None,
+                    Some(Space::new(rate)),
+                ),
+                Effect::Original => unreachable!("original uses the dry path"),
+            };
+        let (cross_seconds, cross_hz) = if matches!(effect, Effect::Space3D) {
+            (0.00045, 4500.0)
+        } else {
+            (0.0003, 700.0)
         };
         Self {
-            eq: Biquad::shelf(rate, 160.0, bass),
+            eq,
+            side_hp,
+            bass,
+            compressor,
+            space,
             rooms: [
                 Room::new(rate, false, feedback),
                 Room::new(rate, true, feedback),
             ],
             cross_delay: [
-                Delay::new((rate * 0.0003) as usize),
-                Delay::new((rate * 0.0003) as usize),
+                Delay::new((rate * cross_seconds) as usize),
+                Delay::new((rate * cross_seconds) as usize),
             ],
             cross_lp: [0.0; 2],
-            lp_coeff: 1.0 - (-2.0 * PI * 700.0 / rate).exp(),
+            lp_coeff: 1.0 - (-2.0 * PI * cross_hz / rate).exp(),
             crossfeed,
             width,
             wet,
@@ -179,9 +468,19 @@ impl Profile {
         }
     }
     fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
-        let mut signal = self.eq.process(input);
+        let mut signal = input;
+        for eq in &mut self.eq {
+            signal = eq.process(signal);
+        }
+        if let Some(bass) = &mut self.bass {
+            signal = bass.process(signal);
+        }
         let mid = (signal[0] + signal[1]) * 0.5;
-        let side = (signal[0] - signal[1]) * 0.5 * self.width;
+        let mut side = (signal[0] - signal[1]) * 0.5;
+        for hp in &mut self.side_hp {
+            side = hp.process_mono(side);
+        }
+        side *= self.width;
         signal = [mid + side, mid - side];
         for (c, value) in signal.iter().enumerate() {
             self.cross_lp[c] += self.lp_coeff * (*value - self.cross_lp[c]);
@@ -190,19 +489,77 @@ impl Profile {
         for c in 0..2 {
             self.cross_delay[c].write(self.cross_lp[c]);
         }
-        let room_input = (signal[0] + signal[1]) * 0.5;
-        std::array::from_fn(|c| {
+        let room_input = if self.space.is_some() {
+            mid * 0.35 + side * 0.90
+        } else {
+            mid
+        };
+        let mut wet = [
+            self.rooms[0].process(room_input) * self.wet,
+            self.rooms[1].process(room_input) * self.wet,
+        ];
+        if let Some(space) = &mut self.space {
+            let early = space.process(mid, side);
+            wet[0] += early[0];
+            wet[1] += early[1];
+            wet = rotate(wet, space.angle());
+        }
+        let mut output = [0.0; 2];
+        for c in 0..2 {
             // Dry stereo channels are preserved independently (unlike VLC 3 spatializer).
             let direct = (signal[c] + cross[c] * self.crossfeed) / (1.0 + self.crossfeed);
-            (direct + self.rooms[c].process(room_input) * self.wet) * self.gain
-        })
+            output[c] = direct + wet[c];
+        }
+        if let Some(compressor) = &mut self.compressor {
+            output = compressor.process(output);
+        }
+        output.map(|v| v * self.gain)
+    }
+    fn reset(&mut self) {
+        for eq in &mut self.eq {
+            eq.z = [[0.0; 2]; 2];
+        }
+        for hp in &mut self.side_hp {
+            hp.z = [[0.0; 2]; 2];
+        }
+        if let Some(bass) = &mut self.bass {
+            bass.reset();
+        }
+        if let Some(compressor) = &mut self.compressor {
+            compressor.envelope = 0.0;
+        }
+        if let Some(space) = &mut self.space {
+            for tap in &mut space.taps {
+                tap.data.fill(0.0);
+                tap.position = 0;
+            }
+            space.phase = 0.0;
+        }
+        self.cross_lp = [0.0; 2];
+        for delay in &mut self.cross_delay {
+            delay.data.fill(0.0);
+            delay.position = 0;
+        }
+        for room in &mut self.rooms {
+            for comb in &mut room.combs {
+                comb.delay.data.fill(0.0);
+                comb.delay.position = 0;
+                comb.lowpass = 0.0;
+            }
+            for ap in &mut room.allpasses {
+                ap.data.fill(0.0);
+                ap.position = 0;
+            }
+        }
     }
 }
 pub struct Processor {
-    profiles: [Profile; 4],
-    weights: [f32; 5],
+    profiles: [Profile; Effect::COUNT - 1],
+    weights: [f32; Effect::COUNT],
     target: usize,
     fade: f32,
+    warmup_frames: u32,
+    warmup_length: u32,
     volume: f32,
     target_volume: f32,
     volume_fade: f32,
@@ -217,19 +574,22 @@ impl Processor {
     pub fn new(rate: u32, effect: usize, volume: u16) -> Self {
         let rate = rate as f32;
         let effect = Effect::from_index(effect) as usize;
-        let mut weights = [0.0; 5];
+        let mut weights = [0.0; Effect::COUNT];
         weights[effect] = 1.0;
         Self {
             profiles: [
-                Effect::Spatial,
                 Effect::Bass,
                 Effect::Live,
                 Effect::Livehouse,
+                Effect::Club,
+                Effect::Space3D,
             ]
             .map(|e| Profile::new(e, rate)),
             weights,
             target: effect,
             fade: 1.0 - (-1.0 / (rate * 0.035)).exp(),
+            warmup_frames: 0,
+            warmup_length: (rate * 0.05) as u32,
             volume: volume.min(100) as f32 / 100.0,
             target_volume: volume.min(100) as f32 / 100.0,
             volume_fade: 1.0 - (-1.0 / (rate * 0.01)).exp(),
@@ -243,34 +603,31 @@ impl Processor {
     }
     pub fn reset(&mut self, effect: usize, volume: u16) {
         self.edge_mix = 0.0;
+        self.warmup_frames = 0;
         self.target = Effect::from_index(effect) as usize;
-        self.weights = [0.0; 5];
+        self.weights = [0.0; Effect::COUNT];
         self.weights[self.target] = 1.0;
         self.volume = volume.min(100) as f32 / 100.0;
         self.target_volume = self.volume;
         self.limiter = 1.0;
         for profile in &mut self.profiles {
-            profile.eq.z = [[0.0; 2]; 2];
-            profile.cross_lp = [0.0; 2];
-            for delay in &mut profile.cross_delay {
-                delay.data.fill(0.0);
-                delay.position = 0;
-            }
-            for room in &mut profile.rooms {
-                for comb in &mut room.combs {
-                    comb.delay.data.fill(0.0);
-                    comb.delay.position = 0;
-                    comb.lowpass = 0.0;
-                }
-                for ap in &mut room.allpasses {
-                    ap.data.fill(0.0);
-                    ap.position = 0;
-                }
-            }
+            profile.reset();
         }
     }
     pub fn set(&mut self, effect: usize, volume: u16) {
-        self.target = Effect::from_index(effect) as usize;
+        let target = Effect::from_index(effect) as usize;
+        if target != self.target {
+            if self.target != 0 && self.weights[self.target] == 0.0 {
+                self.profiles[self.target - 1].reset();
+            }
+            self.target = target;
+            // Prime the delay lines before a cold preset contributes to the mix.
+            self.warmup_frames = if target != 0 && self.weights[target] == 0.0 {
+                self.warmup_length
+            } else {
+                0
+            };
+        }
         self.target_volume = volume.min(100) as f32 / 100.0;
     }
     pub fn render(&mut self, sample: Option<[f32; 2]>) -> [f32; 2] {
@@ -291,17 +648,35 @@ impl Processor {
     }
     pub fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
         let input = input.map(|v| if v.is_finite() { v } else { 0.0 });
-        for i in 0..5 {
-            self.weights[i] +=
-                self.fade * ((if i == self.target { 1.0 } else { 0.0 }) - self.weights[i]);
+        let warming_up = self.warmup_frames > 0;
+        if !warming_up {
+            for i in 0..Effect::COUNT {
+                self.weights[i] +=
+                    self.fade * ((if i == self.target { 1.0 } else { 0.0 }) - self.weights[i]);
+            }
         }
         let mut output = input.map(|v| v * self.weights[0]);
         for (i, profile) in self.profiles.iter_mut().enumerate() {
+            let index = i + 1;
+            let weight = &mut self.weights[index];
+            if *weight == 0.0 {
+                if warming_up && index == self.target {
+                    profile.process(input);
+                }
+                continue;
+            }
+            // Once the fade reaches -80 dB, stop running the preset and discard its tail.
+            if index != self.target && *weight < 0.0001 {
+                *weight = 0.0;
+                profile.reset();
+                continue;
+            }
             let sample = profile.process(input);
             for c in 0..2 {
-                output[c] += sample[c] * self.weights[i + 1];
+                output[c] += sample[c] * *weight;
             }
         }
+        self.warmup_frames = self.warmup_frames.saturating_sub(1);
         self.volume += self.volume_fade * (self.target_volume - self.volume);
         output = output.map(|v| v * self.volume);
         let peak = output[0].abs().max(output[1].abs());
@@ -350,7 +725,7 @@ mod tests {
     }
     #[test]
     fn all_presets_preserve_left_dry_channel_and_stay_finite() {
-        for effect in 0..5 {
+        for effect in 0..Effect::COUNT {
             let mut dsp = Processor::new(48000, effect, 100);
             let mut energy = 0.0;
             for i in 0..48000 {
@@ -368,7 +743,7 @@ mod tests {
         let mut previous = [0.0; 2];
         for i in 0..144000 {
             if i % 24000 == 0 {
-                dsp.set((i / 24000) % 5, 100);
+                dsp.set((i / 24000) % Effect::COUNT, 100);
             }
             let input = [0.2, 0.2];
             let y = dsp.process(input);
@@ -385,8 +760,8 @@ mod tests {
     }
     #[test]
     fn presets_are_bounded_at_device_sample_rates_and_seek_clears_tails() {
-        for rate in [44100, 48000, 96000] {
-            for effect in 0..5 {
+        for rate in [8000, 16000, 20000, 22050, 44100, 48000, 96000] {
+            for effect in 0..Effect::COUNT {
                 let mut dsp = Processor::new(rate, effect, 100);
                 for i in 0..6000 {
                     let y = dsp.process([
@@ -403,6 +778,68 @@ mod tests {
         }
     }
     #[test]
+    fn club_attenuates_bass_side_and_opens_high_side() {
+        let side_energy = |hz: f32| {
+            let mut dsp = Processor::new(48000, Effect::Club as usize, 100);
+            let (mut input, mut output) = (0.0, 0.0);
+            for i in 0..48000 {
+                let x = (i as f32 * 2.0 * PI * hz / 48000.0).sin() * 0.3;
+                let y = dsp.process([x, -x]);
+                if i > 24000 {
+                    input += x * x;
+                    output += ((y[0] - y[1]) * 0.5).powi(2);
+                }
+            }
+            output / input
+        };
+        for hz in [60.0, 100.0, 140.0, 150.0] {
+            assert!(
+                side_energy(hz) < 0.25,
+                "expected at least 6 dB attenuation at {hz} Hz"
+            );
+        }
+        assert!(side_energy(4000.0) > 1.0);
+    }
+    #[test]
+    fn club_compresses_loud_material_more_than_quiet() {
+        let gain_at = |amplitude: f32| {
+            let mut dsp = Processor::new(48000, Effect::Club as usize, 100);
+            let signal = |i: usize| (i as f32 * 2.0 * PI * 1000.0 / 48000.0).sin() * amplitude;
+            for i in 0..24000 {
+                dsp.process([signal(i), signal(i)]);
+            }
+            let (mut input, mut output) = (0.0, 0.0);
+            for i in 0..24000 {
+                let x = signal(i);
+                let y = dsp.process([x, x]);
+                input += x * x;
+                output += y[0] * y[0];
+            }
+            output / input
+        };
+        assert!(gain_at(0.6) < gain_at(0.05) * 0.8);
+    }
+    #[test]
+    fn space3d_has_strong_side_energy() {
+        let side_energy = |effect: Effect| {
+            let mut dsp = Processor::new(48000, effect as usize, 100);
+            let (mut input, mut output) = (0.0, 0.0);
+            for i in 0..48000 {
+                let x = (i as f32 * 2.0 * PI * 1000.0 / 48000.0).sin() * 0.3;
+                let y = dsp.process([x, 0.0]);
+                if i > 24000 {
+                    input += x * x;
+                    output += ((y[0] - y[1]) * 0.5).powi(2);
+                }
+            }
+            output / input
+        };
+        assert!(
+            side_energy(Effect::Space3D) > side_energy(Effect::Original) * 1.5,
+            "3D space should be clearly wider"
+        );
+    }
+    #[test]
     fn live_and_livehouse_have_distinct_reverb_tails() {
         let tail = |effect| {
             let mut dsp = Processor::new(48000, effect, 100);
@@ -416,7 +853,9 @@ mod tests {
             energy
         };
         assert_eq!(tail(0), 0.0);
-        assert!(tail(3) > tail(4) * 10.0);
-        assert!(tail(4) > 0.0);
+        let live = Effect::Live as usize;
+        let livehouse = Effect::Livehouse as usize;
+        assert!(tail(live) > tail(livehouse) * 10.0);
+        assert!(tail(livehouse) > 0.0);
     }
 }

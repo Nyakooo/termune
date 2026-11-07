@@ -17,6 +17,8 @@ pub struct Config {
     pub auto_login: bool,
     pub volume: u16,
     pub audio_effect: usize,
+    #[serde(default)]
+    pub effect_version: Option<u8>,
     pub last_category: String,
     pub remember_location: bool,
     pub browse_locations: BTreeMap<String, BrowseLocation>,
@@ -39,6 +41,7 @@ impl Default for Config {
             auto_login: false,
             volume: 100,
             audio_effect: 0,
+            effect_version: Some(1),
             last_category: "album".into(),
             remember_location: true,
             browse_locations: BTreeMap::new(),
@@ -56,6 +59,17 @@ impl Config {
             .config_dir()
             .join("config.toml"))
     }
+    fn migrate_effects(&mut self) {
+        if self.effect_version.is_none() {
+            // v1 removed the old "headphone" preset at index 1.
+            self.audio_effect = match self.audio_effect {
+                1 | 6 => 5,
+                index @ 2..=5 => index - 1,
+                _ => 0,
+            };
+            self.effect_version = Some(1);
+        }
+    }
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         let text = match std::fs::read_to_string(path) {
@@ -66,6 +80,7 @@ impl Config {
             Err(_) => return Err("读取 config.toml 失败".into()),
         };
         let mut config: Self = toml::from_str(&text).map_err(|_| "config.toml 格式错误")?;
+        config.migrate_effects();
         config.audio_effect = crate::effects::Effect::from_index(config.audio_effect) as usize;
         config.theme %= 5;
         if config.layout_version == 0 {
@@ -97,5 +112,21 @@ impl Config {
     }
     pub fn text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
         if self.english { en } else { zh }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    #[test]
+    fn legacy_effect_indices_migrate_once() {
+        let mut config: Config = toml::from_str("audio_effect = 6").unwrap();
+        assert!(config.effect_version.is_none());
+        config.migrate_effects();
+        assert_eq!(config.audio_effect, 5);
+        assert_eq!(config.effect_version, Some(1));
+        config.audio_effect = 4;
+        config.migrate_effects();
+        assert_eq!(config.audio_effect, 4);
     }
 }

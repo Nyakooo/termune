@@ -161,6 +161,7 @@ pub enum Action {
     Seek(f64),
     CycleMode,
     CycleEffect,
+    CycleEffectBack,
     Volume(i16),
     VolumeAt(u16, u16),
     Favorite,
@@ -1393,6 +1394,16 @@ impl App {
         self.status = format!("音量 / Volume: {volume}%");
         self.save();
     }
+    fn cycle_effect(&mut self, direction: isize) {
+        let count = crate::effects::Effect::COUNT as isize;
+        let effect = (self.config.audio_effect as isize + count + direction) % count;
+        let effect = effect as usize;
+        if let Some(player) = self.player.as_mut() {
+            player.set_effect(effect);
+        }
+        self.config.audio_effect = effect;
+        self.save();
+    }
     fn action(&mut self, action: Action) {
         match action {
             Action::Seek(fraction) => {
@@ -1413,14 +1424,8 @@ impl App {
                     preview: None,
                 });
             }
-            Action::CycleEffect => {
-                let effect = (self.config.audio_effect + 1) % crate::effects::Effect::COUNT;
-                if let Some(player) = self.player.as_mut() {
-                    player.set_effect(effect);
-                }
-                self.config.audio_effect = effect;
-                self.save();
-            }
+            Action::CycleEffect => self.cycle_effect(1),
+            Action::CycleEffectBack => self.cycle_effect(-1),
             Action::CycleMode => {
                 self.config.playback_mode = self.config.playback_mode.next();
                 self.save();
@@ -1802,6 +1807,9 @@ impl App {
             KeyCode::Char(c @ '1'..='6') => self.switch(c as usize - '1' as usize),
             KeyCode::Char('r' | 'R') => self.action(Action::Refresh),
             KeyCode::Char('/') => self.action(Action::Search),
+            KeyCode::Char('e' | 'E') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.action(Action::CycleEffectBack);
+            }
             KeyCode::Char('e' | 'E') => self.action(Action::CycleEffect),
             KeyCode::Char('o' | 'O') => self.action(Action::CycleMode),
             KeyCode::Char('f' | 'F') => self.action(Action::Favorite),
