@@ -35,6 +35,7 @@ jobs:
             | jq -r '.[] | select(.isDraft == false) | .tagName' \
             > "$RUNNER_TEMP/release-tags.txt"
 
+          updated=0
           while IFS= read -r tag; do
             [[ -n "$tag" ]] || continue
             echo "::group::Sync $tag"
@@ -55,6 +56,9 @@ jobs:
             fi
 
             gh release edit "$tag" --notes-file "$RUNNER_TEMP/release-notes.md"
+            updated=$((updated + 1))
             echo "Updated $tag"
             echo "::endgroup::"
           done < "$RUNNER_TEMP/release-tags.txt"
+
+          echo "Release note sync complete: $updated release(s) updated."
