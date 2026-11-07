@@ -2,6 +2,27 @@
 
 工作流：[Build, test and release](https://github.com/Nyakooo/termune/actions/workflows/ci.yml)。
 
+## 本地构建
+
+使用支持 Rust 2024 的稳定版 Rust、C 编译器和 CMake 3.16 或更新版本。Linux 构建还需要 ALSA 开发库。Debian 或 Ubuntu 可安装以下依赖。
+
+```sh
+sudo apt-get install build-essential cmake pkg-config libasound2-dev
+```
+
+macOS 使用 Xcode 命令行工具，Windows 使用 MSVC C++ 构建工具。
+
+在仓库根目录构建并运行测试。
+
+```sh
+cargo build --release --locked
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+生成的程序位于 `target/release/termune`，Windows 下文件名为 `termune.exe`。
+
 ## 平台与校验
 
 | Rust target | GitHub runner |

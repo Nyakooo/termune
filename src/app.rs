@@ -47,6 +47,15 @@ pub struct View {
     pub loaded: bool,
     pub table: TableState,
 }
+impl View {
+    fn set_page(&mut self, number: u64, page: Page) {
+        self.table = TableState::default().with_selected((!page.items.is_empty()).then_some(0));
+        self.items = page.items;
+        self.total = page.total;
+        self.page = number;
+        self.loaded = true;
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Detail {
     pub kind: String,
@@ -110,7 +119,7 @@ enum Reply {
     Media(u64, String, crate::media::Download),
     Page(Load, Result<Page>),
     Audio(u64, String, Result<termune::stream::AudioSource>),
-    Advance(u64, PlaybackContext, Result<Value>),
+    Advance(u64, PlaybackContext, Result<Page>),
     Favorite(u64, String, bool, Result<()>),
     Fatal(String),
 }
@@ -241,6 +250,7 @@ pub struct App {
     pub media: crate::media::Media,
     pub lyric_scroll: usize,
     pub lyrics_follow: bool,
+    lyrics_resume_at: Option<Instant>,
     pub seek_drag: Option<f64>,
     pub seek_rect: Option<Rect>,
     pub volume_drag: Option<VolumeDrag>,
@@ -407,10 +417,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                         if data.total != context.total {
                             return Err("播放队列已变化，请重新选择歌曲".into());
                         }
-                        data.items
-                            .get((context.index % 50) as usize)
-                            .cloned()
-                            .ok_or_else(|| "播放队列已变化，请重新选择歌曲".into())
+                        Ok(data)
                     })();
                     let _ = tx.send(Reply::Advance(id, context, result));
                 });
@@ -661,6 +668,7 @@ impl App {
             media: crate::media::Media::default(),
             lyric_scroll: 0,
             lyrics_follow: true,
+            lyrics_resume_at: None,
             seek_drag: None,
             seek_rect: None,
             volume_drag: None,
@@ -827,6 +835,7 @@ impl App {
         self.favorite_busy = false;
         self.shuffle_history.clear();
         self.media = crate::media::Media::default();
+        self.follow_lyrics();
         self.media_cache.clear();
         self.stop_audio();
         self.cancel();
@@ -851,6 +860,12 @@ impl App {
         self.focus = 2;
     }
     fn replies(&mut self) {
+        if self
+            .lyrics_resume_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.follow_lyrics();
+        }
         if let Some(result) = self.player.as_mut().and_then(|p| p.poll()) {
             self.player = None;
             self.seek_error = None;
@@ -910,15 +925,9 @@ impl App {
                             }
                             let loaded = page.items.len();
                             let view = self.view_mut();
-                            view.items = page.items;
-                            view.total = page.total;
-                            view.page = load.page;
-                            view.loaded = true;
-                            view.table = TableState::default();
+                            view.set_page(load.page, page);
                             if let Some(selection) = load.selection {
                                 selection.apply(view);
-                            } else if loaded > 0 {
-                                view.table.select(Some(0));
                             }
                             let message = if self.config.english {
                                 format!("Loaded {loaded} items")
@@ -964,7 +973,14 @@ impl App {
                 }
                 Reply::Advance(id, context, result) if id == self.audio_generation => {
                     match result {
-                        Ok(item) => self.start_item(item, context),
+                        Ok(page) => {
+                            if let Some(item) = page.items.get((context.index % 50) as usize) {
+                                self.start_queued_item(item.clone(), context, Some(page));
+                            } else {
+                                self.audio_loading = None;
+                                self.fail("播放队列已变化，请重新选择歌曲".into());
+                            }
+                        }
                         Err(e) => {
                             self.audio_loading = None;
                             self.fail(e);
@@ -1101,7 +1117,7 @@ impl App {
         self.playing_context = Some(context);
         self.playing_item = Some(item);
         self.audio_loading = Some(title.clone());
-        self.lyrics_follow = true;
+        self.follow_lyrics();
         self.seek_drag = None;
         self.clear_status();
         if self
@@ -1117,6 +1133,54 @@ impl App {
             self.fail("后台任务已停止".into());
         }
     }
+    fn start_queued_item(&mut self, item: Value, context: PlaybackContext, page: Option<Page>) {
+        if self.section == context.section
+            && self.query == context.query
+            && self.detail.as_ref().map(|d| (&d.kind, &d.guid))
+                == context.detail.as_ref().map(|d| (&d.kind, &d.guid))
+            && let Some(guid) = item["guid"].as_str()
+        {
+            self.focus_queued_track(&context, guid, page);
+        }
+        self.start_item(item, context);
+    }
+    fn focus_queued_track(&mut self, context: &PlaybackContext, guid: &str, page: Option<Page>) {
+        let index = if context.playlist.is_some() {
+            let Some(index) = self.open_playlist().and_then(|playlist| {
+                playlist
+                    .tracks
+                    .iter()
+                    .position(|item| item["guid"].as_str() == Some(guid))
+            }) else {
+                return;
+            };
+            index as u64
+        } else {
+            context.index
+        };
+        let number = index / 50 + 1;
+        let row = (index % 50) as usize;
+        if self.busy {
+            self.cancel();
+        }
+        if self.view().page == number
+            && let Some(row) = self
+                .view()
+                .items
+                .iter()
+                .position(|item| item["guid"].as_str() == Some(guid))
+        {
+            self.view_mut().table.select(Some(row));
+        } else if let Some(page) = page {
+            let view = self.view_mut();
+            view.set_page(number, page);
+            view.table.select(Some(row));
+        } else if context.playlist.is_some() {
+            self.load_playlist_page(number, row);
+        } else {
+            self.load_with_selection(number, Some(BrowseSelection::track(row, guid)));
+        }
+    }
     fn advance(&mut self, forward: bool, automatic: bool) {
         let Some(mut context) = self.playing_context.clone() else {
             if !automatic {
@@ -1129,7 +1193,7 @@ impl App {
             && self.config.playback_mode == crate::queue::Mode::RepeatOne
             && let Some(item) = self.playing_item.clone()
         {
-            self.start_item(item, context);
+            self.start_queued_item(item, context, None);
             return;
         }
         if self.config.playback_mode == crate::queue::Mode::Shuffle
@@ -1164,7 +1228,7 @@ impl App {
     fn advance_to(&mut self, context: PlaybackContext, forward: bool) {
         if let Some(tracks) = &context.playlist {
             if let Some(item) = tracks.get(context.index as usize) {
-                self.start_item(item.clone(), context);
+                self.start_queued_item(item.clone(), context, None);
             }
             return;
         }
@@ -1325,6 +1389,10 @@ impl App {
         }
         crate::media::active_line(&self.media.times, player.timeline.position)
     }
+    fn follow_lyrics(&mut self) {
+        self.lyrics_follow = true;
+        self.lyrics_resume_at = None;
+    }
     fn refresh_media(&mut self) {
         if !self.connected || !self.config.professional {
             return;
@@ -1357,7 +1425,7 @@ impl App {
         );
         if self.media.key != key {
             self.lyric_scroll = 0;
-            self.lyrics_follow = true;
+            self.follow_lyrics();
             self.media_due = Instant::now();
             let title = name(&item, if track { "title" } else { "name" });
             let artist = artists(&item);
@@ -1482,7 +1550,7 @@ impl App {
                 self.config.professional = !self.config.professional;
                 self.save();
             }
-            Action::FollowLyrics => self.lyrics_follow = true,
+            Action::FollowLyrics => self.follow_lyrics(),
             Action::Field(i) => self.focus = i,
             Action::Connect => self.connect(),
             Action::ToggleRemember => self.toggle_remember(),
@@ -1510,7 +1578,7 @@ impl App {
                     if let Err(error) = player.seek(seconds / duration) {
                         self.show_seek_error(error);
                     } else {
-                        self.lyrics_follow = true;
+                        self.follow_lyrics();
                         self.seek_drag = None;
                     }
                 }
@@ -1518,6 +1586,7 @@ impl App {
             Action::LyricsScroll(delta) => {
                 if delta != 0 {
                     self.lyrics_follow = false;
+                    self.lyrics_resume_at = Some(Instant::now() + Duration::from_secs(10));
                 }
                 self.lyric_scroll = self
                     .lyric_scroll

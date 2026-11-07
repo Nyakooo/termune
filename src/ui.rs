@@ -548,12 +548,19 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum PlayerLyrics {
+    Hidden,
+    Below,
+    Beside,
+}
+
 fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     if a.config.professional && (r.width < 72 || r.height < 18) {
         let rows = Layout::vertical([Constraint::Length(8), Constraint::Min(3)])
             .spacing(1)
             .split(r);
-        player_panel(f, a, rows[0], p, false, false, None);
+        player_panel(f, a, rows[0], p, false, PlayerLyrics::Beside, None);
         library(f, a, rows[1], p, false, false);
         return;
     }
@@ -562,7 +569,7 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             .spacing(1)
             .split(r);
         library(f, a, rows[0], p, false, false);
-        player_panel(f, a, rows[1], p, false, false, None);
+        player_panel(f, a, rows[1], p, false, PlayerLyrics::Hidden, None);
         return;
     }
     match a.config.layout % 4 {
@@ -570,7 +577,15 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             let cols = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .spacing(3)
                 .split(inset(r, 1, 1));
-            player_panel(f, a, cols[0], p, false, true, Some("AIRWAVE"));
+            player_panel(
+                f,
+                a,
+                cols[0],
+                p,
+                false,
+                PlayerLyrics::Below,
+                Some("AIRWAVE"),
+            );
             library(f, a, cols[1], p, false, false);
         }
         1 => {
@@ -582,20 +597,36 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
                 .split(rows[0]);
             library(f, a, cols[0], p, true, true);
             media_sidebar(f, a, cols[1], p);
-            player_panel(f, a, rows[1], p, true, false, Some("OPERATIONS"));
+            player_panel(
+                f,
+                a,
+                rows[1],
+                p,
+                true,
+                PlayerLyrics::Hidden,
+                Some("OPERATIONS"),
+            );
         }
         2 => {
             let rows = Layout::vertical([Constraint::Length(13), Constraint::Min(5)])
                 .spacing(1)
                 .split(r);
-            player_panel(f, a, rows[0], p, false, false, Some("TRACKER"));
+            player_panel(
+                f,
+                a,
+                rows[0],
+                p,
+                false,
+                PlayerLyrics::Beside,
+                Some("TRACKER"),
+            );
             library(f, a, rows[1], p, false, true);
         }
         _ => {
             let rows = Layout::vertical([Constraint::Length(14), Constraint::Min(5)])
                 .spacing(1)
                 .split(r);
-            player_panel(f, a, rows[0], p, true, false, Some("BTOP"));
+            player_panel(f, a, rows[0], p, true, PlayerLyrics::Beside, Some("BTOP"));
             let cols = Layout::horizontal([Constraint::Percentage(68), Constraint::Percentage(32)])
                 .spacing(1)
                 .split(rows[1]);
@@ -616,7 +647,7 @@ fn player_panel(
     r: Rect,
     p: Palette,
     boxed: bool,
-    spacious: bool,
+    player_lyrics: PlayerLyrics,
     layout: Option<&str>,
 ) {
     let title = layout.unwrap_or(a.text("播放", "Player"));
@@ -653,7 +684,7 @@ fn player_panel(
         )
     };
     if a.config.professional && inner.height >= 6 {
-        if spacious {
+        if player_lyrics == PlayerLyrics::Below {
             let rows = Layout::vertical([
                 Constraint::Length(4),
                 Constraint::Min(3),
@@ -667,24 +698,32 @@ fn player_panel(
             lyrics(f, a, rows[1], p, false);
             playback_controls(f, a, rows[2], p);
         } else {
-            let cols = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .spacing(2)
-                .split(inner);
-            text(f, line(cols[0], 0), state, p.secondary);
-            text(f, line(cols[0], 1), title, p.accent);
-            text(f, line(cols[0], 3), a.media.artist.clone(), p.dim);
+            let (details, lyric_area) = if player_lyrics == PlayerLyrics::Beside {
+                let cols =
+                    Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                        .spacing(2)
+                        .split(inner);
+                (cols[0], Some(cols[1]))
+            } else {
+                (inner, None)
+            };
+            text(f, line(details, 0), state, p.secondary);
+            text(f, line(details, 1), title, p.accent);
+            text(f, line(details, 3), a.media.artist.clone(), p.dim);
             playback_controls(
                 f,
                 a,
                 Rect::new(
-                    cols[0].x,
-                    cols[0].bottom().saturating_sub(3),
-                    cols[0].width,
+                    details.x,
+                    details.bottom().saturating_sub(3),
+                    details.width,
                     3,
                 ),
                 p,
             );
-            lyrics(f, a, cols[1], p, false);
+            if let Some(area) = lyric_area {
+                lyrics(f, a, area, p, false);
+            }
         }
     } else {
         text(f, line(inner, 0), format!("{state} · {title}"), p.accent);
@@ -1245,18 +1284,6 @@ fn inspector(f: &mut Frame, a: &App, r: Rect, p: Palette, overview: bool) {
             lines.push(Line::from(name(&v["album"], "name")));
             lines.push(Line::from(name(&v["audioSpec"], "format")));
         }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        a.text("连接线路", "Connection"),
-        Style::default().fg(p.secondary),
-    )));
-    if let Some(route) = &a.route {
-        lines.push(Line::from(format!(
-            "{} · {}",
-            route.base.scheme().to_ascii_uppercase(),
-            route_label(a, route)
-        )));
     }
     f.render_widget(
         Paragraph::new(lines)

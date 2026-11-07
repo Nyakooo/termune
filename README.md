@@ -4,7 +4,11 @@
 
 飞牛音乐的第三方终端客户端，支持 Windows、macOS 和 Linux。
 
-在终端浏览和搜索曲库、播放音乐、管理收藏和歌单。
+## 功能
+
+- 浏览和搜索 NAS 曲库，收藏歌曲、管理本地歌单。
+- 支持顺序、循环和随机播放，切歌时可自动翻页并选中当前歌曲。
+- 支持同步歌词、音效预设、四种专业布局和极简模式。
 
 ## 安装
 
@@ -58,7 +62,8 @@ termune update
 
 ## 更多文档
 
-- [使用指南（含局域网连接与诊断）](docs/USAGE.md)
+- [使用指南](docs/USAGE.md)
+- [常见问题与反馈](docs/USAGE.md#常见问题)
 - [更新记录](RELEASE_NOTES.md)
 - [构建与发布](docs/RELEASING.md)
 - [音频组件许可](docs/AUDIO_LICENSES.md)

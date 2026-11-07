@@ -17,6 +17,13 @@ pub(super) struct BrowseSelection {
 }
 
 impl BrowseSelection {
+    pub(super) fn track(row: usize, guid: &str) -> Self {
+        Self {
+            row,
+            guid: Some(guid.to_owned()),
+        }
+    }
+
     pub(super) fn apply(&self, view: &mut View) {
         let row = self
             .guid

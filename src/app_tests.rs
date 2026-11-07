@@ -90,17 +90,19 @@ fn key(app: &mut App, code: KeyCode) {
 }
 
 #[test]
-fn header_displays_the_selected_connection_route() {
+fn only_the_header_displays_the_selected_connection_route() {
     let mut app = app();
     app.connected = true;
     app.server = "Test NAS".into();
     app.username = "listener".into();
+    app.config.layout = 3;
     app.route = Some(relay_route());
-    let screen = render(&mut app, 100, 30);
+    let screen = render(&mut app, 120, 36);
     let metadata = screen.lines().nth(1).unwrap();
     assert!(metadata.contains("Test NAS · listener"));
     assert!(metadata.contains("FN Connect 中继"));
     assert!(!metadata.contains("relay.example.test"));
+    assert_eq!(screen.matches("FN Connect 中继").count(), 1);
 
     let data = json!({"ipv4": ["192.168.1.42"]});
     app.route = termune::candidates(&data, false).into_iter().next();
@@ -113,7 +115,7 @@ fn header_displays_the_selected_connection_route() {
             .contains("局域网 · 192.168.1.42")
     );
     app.config.english = true;
-    let screen = render(&mut app, 100, 30);
+    let screen = render(&mut app, 120, 36);
     assert!(
         screen
             .lines()
@@ -121,6 +123,7 @@ fn header_displays_the_selected_connection_route() {
             .unwrap()
             .contains("LAN · 192.168.1.42")
     );
+    assert_eq!(screen.matches("192.168.1.42").count(), 1);
 }
 
 #[test]
@@ -586,10 +589,23 @@ fn restore_has_no_password_and_falls_back_to_login_on_failure() {
 fn lyrics_only_appear_in_professional_mode_and_stale_session_media_is_ignored() {
     let mut app = app();
     app.connected = true;
-    app.media.lyrics = vec!["可辨识的测试歌词".into(); 12];
+    app.media.lyrics = vec!["可辨识的测试歌词".into()];
     for layout in 0..4 {
         app.config.layout = layout;
-        assert!(render(&mut app, 120, 36).contains("可辨识的测试歌词"));
+        let screen = render(&mut app, 120, 36);
+        assert_eq!(
+            screen.matches("可辨识的测试歌词").count(),
+            1,
+            "layout {layout}"
+        );
+        assert_eq!(
+            app.hits
+                .iter()
+                .filter(|(_, action)| matches!(action, Action::LyricsScroll(0)))
+                .count(),
+            1,
+            "layout {layout}"
+        );
         render(&mut app, 36, 20);
         assert!(
             app.hits
@@ -776,7 +792,9 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
     let mut app = app();
     app.connected = true;
     let (tx, commands) = mpsc::channel();
+    let (replies, rx) = mpsc::channel();
     app.tx = tx;
+    app.rx = rx;
     app.views[3] = View {
         items: (0..50)
             .map(|i| json!({"guid":format!("song-{i}"),"title":"test"}))
@@ -791,12 +809,28 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
     app.section = 1;
     app.advance(true, true);
     match commands.recv().unwrap() {
-        Command::Advance { context, .. } => {
+        Command::Advance { id, context } => {
             assert_eq!(context.section, TRACKS);
             assert_eq!(context.index, 50);
+            replies
+                .send(Reply::Advance(
+                    id,
+                    context,
+                    Ok(Page {
+                        items: vec![json!({"guid":"song-50","title":"Next page"})],
+                        total: 51,
+                    }),
+                ))
+                .unwrap();
         }
         _ => panic!("expected cross-page queue request"),
     }
+    app.replies();
+    assert!(
+        matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-50")
+    );
+    assert_eq!(app.section, 1);
+    assert_eq!(app.views[TRACKS].page, 1);
     app.playing_context = Some(PlaybackContext {
         section: 3,
         query: None,
@@ -809,6 +843,93 @@ fn automatic_cross_page_play_and_single_repeat_keep_origin_context() {
     app.config.playback_mode = crate::queue::Mode::RepeatOne;
     app.advance(true, true);
     assert!(matches!(commands.recv().unwrap(),Command::Play{guid,..}if guid=="original"));
+}
+
+#[test]
+fn playback_modes_focus_the_new_track_and_page_in_the_current_source() {
+    use crate::queue::Mode;
+
+    for (mode, index, total, target) in [
+        (Mode::Sequence, 49, 52, 50),
+        (Mode::Loop, 51, 52, 0),
+        (Mode::Shuffle, 0, 2, 1),
+        (Mode::RepeatOne, 1, 2, 1),
+    ] {
+        let items = |page: u64| {
+            ((page - 1) * 50..(page * 50).min(total))
+                .map(|i| json!({"guid":format!("song-{i}"),"title":format!("Song {i}")}))
+                .collect()
+        };
+        let mut app = app();
+        app.connected = true;
+        app.config.playback_mode = mode;
+        let (tx, commands) = mpsc::channel();
+        let (replies, rx) = mpsc::channel();
+        app.tx = tx;
+        app.rx = rx;
+        let start_page = index / 50 + 1;
+        app.view_mut().set_page(
+            start_page,
+            Page {
+                items: items(start_page),
+                total,
+            },
+        );
+        app.view_mut().table.select(Some((index % 50) as usize));
+        app.play_selected();
+        assert!(matches!(commands.try_recv(), Ok(Command::Play { .. })));
+        app.view_mut().table.select(None);
+
+        app.advance(true, true);
+        let page = target / 50 + 1;
+        if mode != Mode::RepeatOne {
+            let Command::Advance { id, context } = commands.try_recv().unwrap() else {
+                panic!("expected next track request for {mode:?}");
+            };
+            assert_eq!(context.index, target);
+            replies
+                .send(Reply::Advance(
+                    id,
+                    context,
+                    Ok(Page {
+                        items: items(page),
+                        total,
+                    }),
+                ))
+                .unwrap();
+            app.replies();
+        }
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::Play { guid, .. }) if guid == format!("song-{target}"))
+        );
+        assert_eq!(app.view().page, page, "{mode:?}");
+        assert_eq!(
+            app.view().table.selected(),
+            Some((target % 50) as usize),
+            "{mode:?}"
+        );
+        assert!(commands.try_recv().is_err());
+    }
+}
+
+#[test]
+fn lyric_scrolling_resumes_sync_after_ten_seconds_without_another_scroll() {
+    let mut app = app();
+    let now = Instant::now();
+    app.action(Action::LyricsScroll(1));
+    assert!(!app.lyrics_follow);
+    assert!(app.lyrics_resume_at.unwrap() >= now + Duration::from_secs(10));
+    app.replies();
+    assert!(!app.lyrics_follow);
+
+    app.lyrics_resume_at = Some(Instant::now());
+    app.action(Action::LyricsScroll(-1));
+    app.replies();
+    assert!(!app.lyrics_follow);
+    app.lyrics_resume_at = Some(Instant::now());
+    app.replies();
+    assert!(app.lyrics_follow);
+    assert!(app.lyrics_resume_at.is_none());
 }
 
 #[test]
@@ -1242,16 +1363,17 @@ fn playlist_queue_crosses_pages_and_keeps_its_original_tracks() {
         matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-49")
     );
 
-    app.load_playlist_page(2, 0);
+    app.advance(true, true);
+    assert!(
+        matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-50")
+    );
+    assert_eq!(app.view().page, 2);
+    assert_eq!(app.view().table.selected(), Some(0));
     assert_eq!(app.view().items[0]["guid"], "song-50");
     app.playlists.clear();
     app.detail = None;
     app.section = TRACKS;
     app.config.playback_mode = crate::queue::Mode::Loop;
-    app.advance(true, true);
-    assert!(
-        matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-50")
-    );
     app.advance(true, true);
     assert!(matches!(commands.try_recv().unwrap(), Command::Play { guid, .. } if guid == "song-0"));
 }

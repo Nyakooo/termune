@@ -1,5 +1,7 @@
 # 连接与资源探针 / Protocol notes
 
+这里记录 FN Connect 协议和早期验证过程。文中的 VLC 播放桥与旧版界面属于历史实现。当前操作、连接设置和诊断入口见 [使用指南](USAGE.md)。
+
 ## 来源与范围
 
 - 官方说明：<https://help.fnnas.com/articles/v1/access/how-access>
