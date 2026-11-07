@@ -5,8 +5,8 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parent.parent
-TAG_PATTERN = re.compile(r"v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?")
-HEADING_PATTERN = re.compile(r"^# Termune (v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$")
+TAG_PATTERN = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
+HEADING_PATTERN = re.compile(r"^# Termune (v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
 
 
 def extract_release_notes(tag: str, source: Path) -> str:
@@ -37,7 +37,7 @@ def extract_release_notes(tag: str, source: Path) -> str:
     if len(section) < 2 or not any(line.strip() for line in section[1:]):
         raise ValueError(f"Release notes section for {tag} is empty")
 
-    return "\\n".join(section).strip() + "\\n"
+    return "\n".join(section).strip() + "\n"
 
 
 def main() -> None:
