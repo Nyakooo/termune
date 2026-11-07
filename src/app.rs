@@ -184,12 +184,30 @@ pub struct VolumeDrag {
     pub preview: Option<u16>,
 }
 
+struct TimedMessage {
+    text: String,
+    until: Instant,
+}
+
+impl TimedMessage {
+    fn new(text: String, seconds: u64) -> Self {
+        Self {
+            text,
+            until: Instant::now() + Duration::from_secs(seconds),
+        }
+    }
+
+    fn active(&self, now: Instant) -> Option<&str> {
+        (now < self.until).then_some(self.text.as_str())
+    }
+}
+
 pub struct App {
     pub config: Config,
     pub fields: [String; 3],
     pub focus: usize,
     pub remember: bool,
-    pub notice: Option<String>,
+    notice: Option<TimedMessage>,
     pub connected: bool,
     pub restoring: bool,
     pub server: String,
@@ -210,8 +228,9 @@ pub struct App {
     pub search_input: String,
     pub busy: bool,
     pub stage: &'static str,
-    pub status: String,
+    status: Option<TimedMessage>,
     pub error: bool,
+    seek_error: Option<TimedMessage>,
     pub hits: Vec<(Rect, Action)>,
     last_click: Option<(u16, u16, Instant)>,
     pub tick: usize,
@@ -543,7 +562,7 @@ impl App {
         self.busy = true;
         self.stage = "restore";
         self.restoring = true;
-        self.error = false;
+        self.clear_status();
         if self
             .tx
             .send(Command::Restore {
@@ -638,7 +657,8 @@ impl App {
             busy: false,
             stage: "",
             error: !status.is_empty(),
-            status,
+            status: (!status.is_empty()).then(|| TimedMessage::new(status, 8)),
+            seek_error: None,
             hits: Vec::new(),
             last_click: None,
             tick: 0,
@@ -695,14 +715,36 @@ impl App {
     }
     fn fail(&mut self, error: String) {
         self.restoring = false;
-        self.status = error;
-        self.error = true;
+        self.show_status(error, true);
         self.busy = false;
+    }
+    fn show_status(&mut self, message: String, error: bool) {
+        self.status = Some(TimedMessage::new(message, if error { 8 } else { 3 }));
+        self.error = error;
+    }
+    fn clear_status(&mut self) {
+        self.status = None;
+        self.error = false;
+    }
+    fn show_notice(&mut self, warning: String) {
+        self.notice = Some(TimedMessage::new(warning, 8));
+    }
+    fn show_seek_error(&mut self, error: String) {
+        self.seek_error = Some(TimedMessage::new(error, 3));
+    }
+    pub fn footer_messages(&self) -> (Option<&str>, Option<&str>, Option<&str>) {
+        let now = Instant::now();
+        (
+            self.status.as_ref().and_then(|message| message.active(now)),
+            self.notice.as_ref().and_then(|message| message.active(now)),
+            self.seek_error
+                .as_ref()
+                .and_then(|message| message.active(now)),
+        )
     }
     fn save(&mut self) {
         if let Err(error) = self.config.save() {
-            self.status = error;
-            self.error = true;
+            self.show_status(error, true);
         }
     }
     fn load(&mut self, page: u64) {
@@ -719,9 +761,8 @@ impl App {
         }
         let id = self.next_id();
         self.busy = true;
-        self.error = false;
+        self.clear_status();
         self.stage = "loading";
-        self.status.clear();
         let load = Load {
             id,
             section: self.section,
@@ -758,9 +799,8 @@ impl App {
         }
         let id = self.next_id();
         self.busy = true;
-        self.error = false;
+        self.clear_status();
         self.stage = "discovery";
-        self.status.clear();
         let password = std::mem::take(&mut self.fields[2]);
         if self
             .tx
@@ -801,23 +841,25 @@ impl App {
         self.playlist_dialog = None;
         self.query = None;
         self.detail = None;
-        self.editing = false;
+        self.close_search();
         self.search_view = View::default();
         self.detail_view = View::default();
-        self.status = self
-            .text("已断开，请重新连接", "Disconnected. Connect again.")
-            .into();
-        self.error = false;
+        self.notice = None;
+        self.show_status(
+            self.text("已断开，请重新连接", "Disconnected. Connect again.")
+                .into(),
+            false,
+        );
         self.fields[2].clear();
         self.focus = 2;
     }
     fn replies(&mut self) {
         if let Some(result) = self.player.as_mut().and_then(|p| p.poll()) {
             self.player = None;
+            self.seek_error = None;
             match result {
                 Ok(()) => {
-                    self.status = self.text("播放结束", "Playback finished").into();
-                    self.error = false;
+                    self.show_status(self.text("播放结束", "Playback finished").into(), false);
                     self.advance(true, true);
                 }
                 Err(error) => {
@@ -844,15 +886,17 @@ impl App {
                         self.route = connected.route;
                         self.remember = connected.remembered;
                         self.config.auto_login = connected.remembered;
-                        self.notice = connected.warning;
+                        self.notice = connected
+                            .warning
+                            .map(|warning| TimedMessage::new(warning, 8));
                         self.busy = false;
                         self.config.fn_id = self.fields[0].trim().to_ascii_lowercase();
                         self.config.username = self.fields[1].trim().to_owned();
                         if let Err(error) = self.config.save() {
-                            self.notice = Some(error);
+                            self.show_notice(error);
                         }
                         if let Err(error) = self.read_playlists() {
-                            self.notice = Some(error);
+                            self.show_notice(error);
                         }
                         self.restore_location();
                     }
@@ -879,12 +923,12 @@ impl App {
                             } else if loaded > 0 {
                                 view.table.select(Some(0));
                             }
-                            self.status = if self.config.english {
+                            let message = if self.config.english {
                                 format!("Loaded {loaded} items")
                             } else {
                                 format!("已加载 {loaded} 条")
                             };
-                            self.error = false;
+                            self.show_status(message, false);
                         }
                         Err(e) => {
                             if termune::is_auth_error(&e) {
@@ -957,26 +1001,25 @@ impl App {
                             {
                                 self.load(self.view().page.max(1));
                             } else {
-                                self.status = self
-                                    .text(
-                                        if enabled {
-                                            "已收藏"
-                                        } else {
-                                            "已取消收藏"
-                                        },
-                                        if enabled {
-                                            "Added to favorites"
-                                        } else {
-                                            "Removed from favorites"
-                                        },
-                                    )
-                                    .into();
+                                let message = self.text(
+                                    if enabled {
+                                        "已收藏"
+                                    } else {
+                                        "已取消收藏"
+                                    },
+                                    if enabled {
+                                        "Added to favorites"
+                                    } else {
+                                        "Removed from favorites"
+                                    },
+                                );
+                                self.show_status(message.into(), false);
                             }
                         }
                         Err(e) => self.fail(e),
                     }
                 }
-                Reply::Forgotten(Err(error)) => self.notice = Some(error),
+                Reply::Forgotten(Err(error)) => self.show_notice(error),
                 Reply::Audio(id, title, result) if id == self.audio_generation => {
                     self.audio_loading = None;
                     match result.and_then(|response| {
@@ -989,8 +1032,7 @@ impl App {
                     }) {
                         Ok(player) => {
                             self.player = Some(player);
-                            self.error = false;
-                            self.status.clear();
+                            self.clear_status();
                         }
                         Err(error) => self.fail(error),
                     }
@@ -1018,6 +1060,7 @@ impl App {
         self.audio_generation = self.audio_generation.wrapping_add(1);
         self.audio_loading = None;
         self.player = None;
+        self.seek_error = None;
         self.playing_item = None;
         self.playing_context = None;
         self.seek_drag = None;
@@ -1063,8 +1106,7 @@ impl App {
         self.audio_loading = Some(title.clone());
         self.lyrics_follow = true;
         self.seek_drag = None;
-        self.error = false;
-        self.status.clear();
+        self.clear_status();
         if self
             .tx
             .send(Command::Play {
@@ -1208,13 +1250,14 @@ impl App {
         );
         if let Err(error) = self.config.save() {
             self.config.category_order = previous;
-            self.status = error;
-            self.error = true;
+            self.show_status(error, true);
             return;
         }
         self.category_order = order;
-        self.status = self.text("已保存类目顺序", "Category order saved").into();
-        self.error = false;
+        self.show_status(
+            self.text("已保存类目顺序", "Category order saved").into(),
+            false,
+        );
     }
     fn switch(&mut self, section: usize) {
         if section >= KINDS.len() {
@@ -1228,12 +1271,11 @@ impl App {
         }
         self.query = None;
         self.detail = None;
-        self.editing = false;
+        self.close_search();
         if !self.view().loaded {
             self.load(1);
         } else {
-            self.status.clear();
-            self.error = false;
+            self.clear_status();
         }
     }
     fn select(&mut self) {
@@ -1362,7 +1404,7 @@ impl App {
         if let Some(player) = self.player.as_mut() {
             let duration = player.timeline.duration;
             if let Err(error) = player.seek((player.timeline.position + seconds) / duration) {
-                self.fail(error);
+                self.show_seek_error(error);
             }
         }
     }
@@ -1391,7 +1433,7 @@ impl App {
             player.set_volume(volume);
         }
         self.config.volume = volume;
-        self.status = format!("音量 / Volume: {volume}%");
+        self.show_status(format!("音量 / Volume: {volume}%"), false);
         self.save();
     }
     fn cycle_effect(&mut self, direction: isize) {
@@ -1468,7 +1510,7 @@ impl App {
                 {
                     let duration = player.timeline.duration;
                     if let Err(error) = player.seek(seconds / duration) {
-                        self.fail(error);
+                        self.show_seek_error(error);
                     } else {
                         self.lyrics_follow = true;
                         self.seek_drag = None;
@@ -1488,13 +1530,13 @@ impl App {
                 self.seek_drag = None;
                 self.settings = Some(0);
                 self.help = false;
-                self.editing = false;
+                self.close_search();
             }
             Action::Help => {
                 self.seek_drag = None;
                 self.help = true;
                 self.settings = None;
-                self.editing = false;
+                self.close_search();
             }
             Action::Setting(row) => self.settings = Some(row),
             Action::ChangeSetting(row, delta) => {
@@ -1505,12 +1547,12 @@ impl App {
                 self.playlist_dialog = None;
                 self.settings = None;
                 self.help = false;
-                self.editing = false;
+                self.close_search();
             }
             Action::Pause => self.toggle_audio(),
             Action::Stop => {
                 self.stop_audio();
-                self.status = self.text("播放已停止", "Playback stopped").into();
+                self.show_status(self.text("播放已停止", "Playback stopped").into(), false);
             }
             Action::PreviousTrack => self.adjacent_track(-1),
             Action::NextTrack => self.adjacent_track(1),
@@ -1521,7 +1563,7 @@ impl App {
             }
             Action::Search => {
                 self.editing = true;
-                self.search_input = self.query.clone().unwrap_or_default();
+                self.search_input.clear();
             }
             Action::Refresh => {
                 if self.section == PLAYLISTS
@@ -1536,19 +1578,22 @@ impl App {
             }
         }
     }
+    fn close_search(&mut self) {
+        self.editing = false;
+        self.search_input.clear();
+    }
     fn back(&mut self) {
         if self.seek_drag.take().is_some() || self.volume_drag.take().is_some() {
             return;
         }
 
         if self.editing {
-            self.editing = false;
+            self.close_search();
             return;
         }
         if self.detail.take().is_some() || self.query.take().is_some() {
             self.cancel();
-            self.status.clear();
-            self.error = false;
+            self.clear_status();
             if !self.view().loaded {
                 self.load(1);
             }
@@ -1727,7 +1772,7 @@ impl App {
         }
         if self.editing {
             match key.code {
-                KeyCode::Esc => self.editing = false,
+                KeyCode::Esc => self.close_search(),
                 KeyCode::Backspace => {
                     self.search_input.pop();
                 }
@@ -1736,8 +1781,8 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let query = self.search_input.trim().to_owned();
+                    self.close_search();
                     if query.is_empty() {
-                        self.editing = false;
                         return;
                     }
                     self.cancel();
@@ -1745,7 +1790,6 @@ impl App {
                     self.detail = None;
                     self.query = Some(query);
                     self.search_view = View::default();
-                    self.editing = false;
                     self.load(1);
                 }
                 KeyCode::Char(c)
@@ -1875,7 +1919,7 @@ impl App {
                         if let Some(player) = &mut self.player
                             && let Err(e) = player.seek(fraction)
                         {
-                            self.fail(e);
+                            self.show_seek_error(e);
                         }
                     }
                 }

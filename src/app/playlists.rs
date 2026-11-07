@@ -143,8 +143,7 @@ impl App {
             self.detail = None;
             self.load_playlist_index(page, row);
         }
-        self.error = false;
-        self.status.clear();
+        self.clear_status();
     }
 
     fn selected_playlist(&self) -> Option<(String, String)> {
@@ -154,8 +153,7 @@ impl App {
     }
 
     pub(super) fn new_playlist(&mut self, track: Option<Value>) {
-        self.status.clear();
-        self.error = false;
+        self.clear_status();
         self.playlist_dialog = Some(PlaylistDialog::Name {
             id: None,
             track,
@@ -203,8 +201,7 @@ impl App {
                 name,
             }
         };
-        self.status.clear();
-        self.error = false;
+        self.clear_status();
         self.playlist_dialog = Some(dialog);
     }
 
@@ -224,8 +221,7 @@ impl App {
         if self.playlists.is_empty() {
             self.new_playlist(Some(track));
         } else {
-            self.status.clear();
-            self.error = false;
+            self.clear_status();
             self.playlist_dialog = Some(PlaylistDialog::Pick {
                 track,
                 cursor: ListState::default().with_selected(Some(0)),
@@ -338,8 +334,7 @@ impl App {
     fn playlist_result(&mut self, result: Result<()>, zh: &str, en: &str) {
         match result {
             Ok(()) => {
-                self.error = false;
-                self.status = self.text(zh, en).into();
+                self.show_status(self.text(zh, en).into(), false);
             }
             Err(error) => self.fail(error),
         }
@@ -355,8 +350,7 @@ impl App {
     pub(super) fn playlist_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.playlist_dialog = None;
-            self.error = false;
-            self.status.clear();
+            self.clear_status();
             return;
         }
         if key.code == KeyCode::Enter {

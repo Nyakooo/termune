@@ -28,7 +28,7 @@ fn export_ui_previews() {
     app.route = "HTTPS · FN Connect".into();
     app.config.professional = true;
     app.views[3]=View{items:(0..12).map(|i|json!({"guid":format!("fixture-{i}"),"title":(["他的睫毛","晴天","七里香","夜曲","一路向北","稻香"][i%6]),"artists":[{"name":"周杰伦"}],"album":{"name":"叶惠美"},"audioSpec":{"format":"FLAC"}})).collect(),total:440,page:1,loaded:true,table:TableState::default().with_selected(1)};
-    app.status = "布局预览 · 测试数据".into();
+    app.show_status("布局预览 · 测试数据".into(), false);
     app.media = crate::media::Media {
         key: "fixture".into(),
         title: "晴天".into(),
@@ -538,6 +538,113 @@ fn lyrics_only_appear_in_professional_mode_and_stale_session_media_is_ignored() 
     app.replies();
     assert!(app.media.key.is_empty());
     assert!(app.media_cache.is_empty());
+}
+
+#[test]
+fn opening_search_starts_with_an_empty_draft() {
+    let mut app = app();
+    app.connected = true;
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    key(&mut app, KeyCode::Char('/'));
+    app.event(Event::Paste("previous".into()));
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(commands.try_recv(), Ok(Command::Load(_))));
+    key(&mut app, KeyCode::Char('/'));
+    assert!(app.editing);
+    assert!(app.search_input.is_empty());
+    assert_eq!(app.query.as_deref(), Some("previous"));
+    app.event(Event::Paste("discarded".into()));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.search_input.is_empty());
+    assert_eq!(app.query.as_deref(), Some("previous"));
+}
+
+#[test]
+fn footer_feedback_expires_without_input_and_reveals_pending_status() {
+    let mut app = app();
+    app.connected = true;
+    app.action(Action::Stop);
+    assert!(render(&mut app, 100, 30).contains("播放已停止"));
+    app.show_notice("Credential warning".into());
+    assert!(render(&mut app, 100, 30).contains("Credential warning"));
+    app.fail("Request failed".into());
+    assert!(render(&mut app, 100, 30).contains("Request failed"));
+
+    app.status.as_mut().unwrap().until = Instant::now();
+    let screen = render(&mut app, 100, 30);
+    assert!(!screen.contains("Request failed"));
+    assert!(screen.contains("Credential warning"));
+    app.notice.as_mut().unwrap().until = Instant::now();
+    assert!(!render(&mut app, 100, 30).contains("Credential warning"));
+
+    app.action(Action::Stop);
+    app.status.as_mut().unwrap().until = Instant::now();
+    assert!(!render(&mut app, 100, 30).contains("播放已停止"));
+}
+
+#[test]
+fn seek_without_duration_shows_a_temporary_message() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        for header in BufReader::new(&mut socket).lines() {
+            if header.unwrap().is_empty() {
+                break;
+            }
+        }
+        let body = r#"{"code":0,"data":{"guid":"test-user","name":"test"}}"#;
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let session = termune::Candidate {
+        base,
+        relay: false,
+        label: "test",
+    }
+    .restore(&termune::client(3).unwrap(), "fixture-token".into())
+    .unwrap();
+    server.join().unwrap();
+
+    let mut app = app();
+    app.connected = true;
+    app.player = Some(
+        crate::player::Player::start(
+            termune::stream::AudioSource {
+                session,
+                guid: "test-track".into(),
+            },
+            "Test track".into(),
+            0,
+            100,
+        )
+        .unwrap(),
+    );
+    app.show_status("Previous status".into(), false);
+    app.event(Event::Key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::CONTROL,
+    )));
+    let message = "尚未取得歌曲时长，暂不能拖动";
+    assert!(render(&mut app, 100, 30).contains(message));
+    app.seek_error.as_mut().unwrap().until = Instant::now();
+    let screen = render(&mut app, 100, 30);
+    assert!(!screen.contains(message), "seek message stayed visible");
+    assert!(screen.contains("Previous status"));
 }
 
 #[test]

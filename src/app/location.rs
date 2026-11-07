@@ -59,7 +59,7 @@ impl App {
         if self.config.browse_locations.get(&key) != Some(&location) {
             self.config.browse_locations.insert(key, location);
             if let Err(error) = self.config.save() {
-                self.notice = Some(error);
+                self.show_notice(error);
             }
         }
     }

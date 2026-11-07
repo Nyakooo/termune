@@ -161,7 +161,8 @@ fn buttons(f: &mut Frame, a: &mut App, r: Rect, items: Vec<(String, Action)>, p:
         x += w + 2;
     }
 }
-fn status(a: &App) -> String {
+fn status(a: &App, p: Palette) -> (String, Color) {
+    let error_color = Color::Rgb(235, 126, 119);
     if a.busy {
         let stage = match a.stage {
             "restore" => a.text("验证已保存的登录状态…", "Checking saved session…"),
@@ -171,16 +172,21 @@ fn status(a: &App) -> String {
             "login" => a.text("登录并验证身份…", "Signing in…"),
             _ => a.text("加载曲库…", "Loading library…"),
         };
-        format!(
-            "{} {stage}",
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][a.tick % 10]
-        )
-    } else if a.error {
-        clean(&a.status)
-    } else if let Some(notice) = &a.notice {
-        clean(notice)
+        return (
+            format!(
+                "{} {stage}",
+                ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][a.tick % 10]
+            ),
+            p.dim,
+        );
+    }
+    let (status, notice, seek_error) = a.footer_messages();
+    if let Some(error) = status.filter(|_| a.error).or(seek_error) {
+        (clean(error), error_color)
+    } else if let Some(notice) = notice {
+        (clean(notice), p.accent)
     } else {
-        clean(&a.status)
+        (clean(status.unwrap_or_default()), p.dim)
     }
 }
 pub fn draw(f: &mut Frame, a: &mut App) {
@@ -216,6 +222,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
     } else {
         login_header(f, a, parts[0], p);
     }
+    let (message, message_color) = status(a, p);
     if a.connected {
         library_layout(f, a, parts[1], p);
     } else if a.restoring {
@@ -226,7 +233,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
                 Line::from(""),
                 Line::from(a.text("验证成功后直接进入曲库", "Your library opens once verified")),
                 Line::from(""),
-                Line::from(status(a)),
+                Line::from(message.clone()),
             ])
             .alignment(Alignment::Center)
             .style(Style::default().fg(p.accent)),
@@ -236,19 +243,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         login(f, a, parts[1], p);
     }
     let footer = parts[2];
-    let message = status(a);
-    text(
-        f,
-        line(footer, 0),
-        message,
-        if a.error {
-            Color::Rgb(235, 126, 119)
-        } else if a.notice.is_some() {
-            p.accent
-        } else {
-            p.dim
-        },
-    );
+    text(f, line(footer, 0), message, message_color);
     let help = if a.connected {
         if area.width >= 105 {
             a.text("↑↓ 选择  Tab 分类  ←→/hl 翻页  Enter 播放/打开  / 搜索  M 极简  O 模式  ? 帮助  Q 退出","↑↓ Select  Tab Library  ←→/hl Page  Enter Play/Open  / Search  M Minimal  O Mode  ? Help  Q Quit")

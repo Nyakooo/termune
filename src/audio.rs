@@ -327,6 +327,30 @@ fn output_with_config<T: cpal::SizedSample + cpal::FromSample<f32>>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn new_effect_replaces_pcm_processing_in_the_first_output_block() {
+        let rate = 48000;
+        let effect = crate::effects::Effect::Bass as usize;
+        let switched = Shared::new(rate, 0, 100);
+        let mut switched_dsp = Processor::new(rate, 0, 100);
+        let mut target_dsp = Processor::new(rate, effect, 100);
+        let mut output = [[0.0; 2]; 480];
+        let frames = (0..960).map(|i| {
+            let t = i as f32 / rate as f32;
+            let sample = (std::f32::consts::TAU * 90.0 * t).sin() * 0.2;
+            [sample; 2]
+        });
+        switched.push(frames.clone());
+        switched.take(&mut output, &mut switched_dsp);
+
+        switched.effect.store(effect, Ordering::Relaxed);
+        switched.take(&mut output, &mut switched_dsp);
+        for (frame, input) in output.into_iter().zip(frames.skip(480)) {
+            assert_eq!(frame, target_dsp.render(Some(input)));
+        }
+    }
+
     #[test]
     fn live_switch_changes_pcm_beyond_simple_volume_gain() {
         let shared = Shared::new(48000, 0, 100);

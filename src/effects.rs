@@ -555,11 +555,7 @@ impl Profile {
 }
 pub struct Processor {
     profiles: [Profile; Effect::COUNT - 1],
-    weights: [f32; Effect::COUNT],
-    target: usize,
-    fade: f32,
-    warmup_frames: u32,
-    warmup_length: u32,
+    effect: usize,
     volume: f32,
     target_volume: f32,
     volume_fade: f32,
@@ -573,9 +569,6 @@ pub struct Processor {
 impl Processor {
     pub fn new(rate: u32, effect: usize, volume: u16) -> Self {
         let rate = rate as f32;
-        let effect = Effect::from_index(effect) as usize;
-        let mut weights = [0.0; Effect::COUNT];
-        weights[effect] = 1.0;
         Self {
             profiles: [
                 Effect::Bass,
@@ -585,11 +578,7 @@ impl Processor {
                 Effect::Space3D,
             ]
             .map(|e| Profile::new(e, rate)),
-            weights,
-            target: effect,
-            fade: 1.0 - (-1.0 / (rate * 0.035)).exp(),
-            warmup_frames: 0,
-            warmup_length: (rate * 0.05) as u32,
+            effect: Effect::from_index(effect) as usize,
             volume: volume.min(100) as f32 / 100.0,
             target_volume: volume.min(100) as f32 / 100.0,
             volume_fade: 1.0 - (-1.0 / (rate * 0.01)).exp(),
@@ -603,10 +592,7 @@ impl Processor {
     }
     pub fn reset(&mut self, effect: usize, volume: u16) {
         self.edge_mix = 0.0;
-        self.warmup_frames = 0;
-        self.target = Effect::from_index(effect) as usize;
-        self.weights = [0.0; Effect::COUNT];
-        self.weights[self.target] = 1.0;
+        self.effect = Effect::from_index(effect) as usize;
         self.volume = volume.min(100) as f32 / 100.0;
         self.target_volume = self.volume;
         self.limiter = 1.0;
@@ -615,18 +601,12 @@ impl Processor {
         }
     }
     pub fn set(&mut self, effect: usize, volume: u16) {
-        let target = Effect::from_index(effect) as usize;
-        if target != self.target {
-            if self.target != 0 && self.weights[self.target] == 0.0 {
-                self.profiles[self.target - 1].reset();
+        let effect = Effect::from_index(effect) as usize;
+        if effect != self.effect {
+            if self.effect != 0 {
+                self.profiles[self.effect - 1].reset();
             }
-            self.target = target;
-            // Prime the delay lines before a cold preset contributes to the mix.
-            self.warmup_frames = if target != 0 && self.weights[target] == 0.0 {
-                self.warmup_length
-            } else {
-                0
-            };
+            self.effect = effect;
         }
         self.target_volume = volume.min(100) as f32 / 100.0;
     }
@@ -648,37 +628,13 @@ impl Processor {
     }
     pub fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
         let input = input.map(|v| if v.is_finite() { v } else { 0.0 });
-        let warming_up = self.warmup_frames > 0;
-        if !warming_up {
-            for i in 0..Effect::COUNT {
-                self.weights[i] +=
-                    self.fade * ((if i == self.target { 1.0 } else { 0.0 }) - self.weights[i]);
-            }
-        }
-        let mut output = input.map(|v| v * self.weights[0]);
-        for (i, profile) in self.profiles.iter_mut().enumerate() {
-            let index = i + 1;
-            let weight = &mut self.weights[index];
-            if *weight == 0.0 {
-                if warming_up && index == self.target {
-                    profile.process(input);
-                }
-                continue;
-            }
-            // Once the fade reaches -80 dB, stop running the preset and discard its tail.
-            if index != self.target && *weight < 0.0001 {
-                *weight = 0.0;
-                profile.reset();
-                continue;
-            }
-            let sample = profile.process(input);
-            for c in 0..2 {
-                output[c] += sample[c] * *weight;
-            }
-        }
-        self.warmup_frames = self.warmup_frames.saturating_sub(1);
+        let output = if self.effect == 0 {
+            input
+        } else {
+            self.profiles[self.effect - 1].process(input)
+        };
         self.volume += self.volume_fade * (self.target_volume - self.volume);
-        output = output.map(|v| v * self.volume);
+        let output = output.map(|v| v * self.volume);
         let peak = output[0].abs().max(output[1].abs());
         let gain = if peak > 0.98 { 0.98 / peak } else { 1.0 };
         if gain < self.limiter {
@@ -738,25 +694,16 @@ mod tests {
         }
     }
     #[test]
-    fn switching_is_continuous_and_original_returns_to_dry() {
-        let mut dsp = Processor::new(48000, 0, 100);
-        let mut previous = [0.0; 2];
-        for i in 0..144000 {
-            if i % 24000 == 0 {
-                dsp.set((i / 24000) % Effect::COUNT, 100);
-            }
-            let input = [0.2, 0.2];
-            let y = dsp.process(input);
-            if i > 0 {
-                assert!((y[0] - previous[0]).abs() < 0.005);
-            }
-            previous = y;
+    fn switching_to_original_immediately_drops_the_previous_tail() {
+        let live = Effect::Live as usize;
+        let mut dsp = Processor::new(48000, live, 100);
+        for _ in 0..4800 {
+            dsp.process([0.1, 0.1]);
         }
         dsp.set(0, 100);
-        for _ in 0..48000 {
-            previous = dsp.process([0.2, -0.2]);
-        }
-        assert!((previous[0] - 0.2).abs() < 1e-4 && (previous[1] + 0.2).abs() < 1e-4);
+        assert_eq!(dsp.process([0.1, -0.1]), [0.1, -0.1]);
+        dsp.set(live, 100);
+        assert_eq!(dsp.process([0.0; 2]), [0.0; 2]);
     }
     #[test]
     fn presets_are_bounded_at_device_sample_rates_and_seek_clears_tails() {
