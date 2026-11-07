@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract only the release-note section matching a Git tag."""
+"""Extract only the release-note body matching a Git tag."""
 import argparse
 from pathlib import Path
 import re
@@ -30,14 +30,18 @@ def extract_release_notes(tag: str, source: Path) -> str:
             end = index
             break
 
-    section = lines[start:end]
-    while section and (not section[-1].strip() or section[-1].strip() == "---"):
-        section.pop()
+    # GitHub already renders the release title above the description.
+    # Remove the matching changelog heading to avoid displaying it twice.
+    section_body = lines[start + 1:end]
+    while section_body and (
+        not section_body[-1].strip() or section_body[-1].strip() == "---"
+    ):
+        section_body.pop()
 
-    if len(section) < 2 or not any(line.strip() for line in section[1:]):
+    if not any(line.strip() for line in section_body):
         raise ValueError(f"Release notes section for {tag} is empty")
 
-    return "\n".join(section).strip() + "\n"
+    return "\n".join(section_body).strip() + "\n"
 
 
 def main() -> None:
