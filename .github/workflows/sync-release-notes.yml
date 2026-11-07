@@ -1,8 +1,6 @@
 name: Sync published release notes
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -11,10 +9,6 @@ permissions:
 jobs:
   sync:
     name: Keep each Release page version-specific
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       contains(github.event.head_commit.message, '[sync-release-notes]'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
