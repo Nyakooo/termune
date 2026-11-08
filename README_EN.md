@@ -6,8 +6,26 @@
 
 **Termune is a cross-platform terminal music player for Feiniu NAS.** Connect to your NAS from the terminal to browse your music library, search tracks, manage playlists, and play music — without opening a browser or a desktop music app.
 
+## Real-world screenshots
+
+Termune has been run in real macOS, Linux, and Windows environments. These screenshots show the actual application, not mockups.
+
+**macOS · Btop layout**
+
 <p align="center">
   <img src="docs/assets/termune-desktop.png" alt="Termune running on macOS in a real terminal session" width="100%">
+</p>
+
+**Linux · Airwave layout**
+
+<p align="center">
+  <img src="docs/assets/termune-linux.png" alt="Termune running on Linux in the Airwave layout" width="100%">
+</p>
+
+**Windows · PowerShell · Btop layout**
+
+<p align="center">
+  <img src="docs/assets/termune-windows.png" alt="Termune running in Windows PowerShell with the Btop layout" width="100%">
 </p>
 
 Runs on **Windows, macOS, and Linux**, and is built with Rust. Termune is an independent third-party client and is not affiliated with, endorsed by, or officially supported by Feiniu.
