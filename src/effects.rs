@@ -506,7 +506,7 @@ impl Profile {
         }
         let mut output = [0.0; 2];
         for c in 0..2 {
-            // Dry stereo channels are preserved independently (unlike VLC 3 spatializer).
+            // Keep the original left and right dry channels independent.
             let direct = (signal[c] + cross[c] * self.crossfeed) / (1.0 + self.crossfeed);
             output[c] = direct + wet[c];
         }
