@@ -39,7 +39,7 @@ cargo test --locked
 ## 发布步骤
 
 1. 同步修改 `Cargo.toml`、`Cargo.lock` 中的项目版本与 `RELEASE_NOTES.md`。
-2. 本地验证 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 和 `python3 scripts/package_release.py --check`。
+2. 本地验证 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 和 `python3 scripts/package_release.py --check`。用 `python3 scripts/extract_release_notes.py --tag v0.1.3` 检查发布说明能否按版本提取，将示例标签换成本次发布的标签。
 3. 提交并推送分支，创建匹配版本的注释标签：
 
    ```sh

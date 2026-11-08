@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, App, DISCONNECT_SETTING, FAVORITES, LAN_HTTP_SETTING, PLAYLISTS, PlaylistDialog,
-    artists, bar_fraction, clean, name,
+    Action, App, DISCONNECT_SETTING, FAVORITES, LAN_HTTP_SETTING, PLAYLISTS, PlaybackMenu,
+    PlaylistDialog, artists, bar_fraction, clean, name,
 };
 use ratatui::{
     Frame,
@@ -8,7 +8,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, Wrap,
     },
 };
 
@@ -199,6 +200,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         area,
     );
     if area.width < 36 || area.height < 20 {
+        a.playback_menu = None;
         f.render_widget(
             Paragraph::new(a.text(
                 "终端过小，请调整到至少 36 × 20\nCtrl+C 退出",
@@ -284,6 +286,7 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         a.hits.clear();
         playlist_dialog(f, a, area, p);
     }
+    playback_menu(f, a, parts[1], p);
 }
 fn route_label(a: &App, route: &termune::Candidate) -> String {
     if route.relay {
@@ -943,18 +946,42 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         }
     }
     if r.height >= 3 {
-        let label = format!("[ {} ]", a.config.playback_mode.label(a.config.english));
         let controls = Layout::horizontal([
             Constraint::Percentage(30),
             Constraint::Percentage(35),
             Constraint::Percentage(35),
         ])
         .split(line(r, 2));
-        button(f, a, controls[0], &label, Action::CycleMode, p);
+        let mode = format!("[ {} ▾ ]", a.config.playback_mode.label(a.config.english));
+        let mode = if Line::from(mode.as_str()).width() <= usize::from(controls[0].width) {
+            mode.as_str()
+        } else {
+            "O ▾"
+        };
+        button(
+            f,
+            a,
+            controls[0],
+            mode,
+            Action::TogglePlaybackMenu(PlaybackMenu::Mode),
+            p,
+        );
         let effect =
             crate::effects::Effect::from_index(a.config.audio_effect).label(a.config.english);
-        let label = format!("[ E {} ]", effect);
-        button(f, a, controls[1], &label, Action::CycleEffect, p);
+        let label = format!("[ E {} ▾ ]", effect);
+        let label = if Line::from(label.as_str()).width() <= usize::from(controls[1].width) {
+            label.as_str()
+        } else {
+            "E ▾"
+        };
+        button(
+            f,
+            a,
+            controls[1],
+            label,
+            Action::TogglePlaybackMenu(PlaybackMenu::Effect),
+            p,
+        );
         let volume = a
             .volume_drag
             .as_ref()
@@ -987,6 +1014,82 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
                 ));
             }
         }
+    }
+}
+fn playback_menu(f: &mut Frame, a: &mut App, area: Rect, p: Palette) {
+    let Some((menu, offset)) = a.playback_menu else {
+        return;
+    };
+    let Some(anchor) = a.hits.iter().find_map(|&(rect, action)| {
+        matches!(action, Action::TogglePlaybackMenu(kind) if kind == menu).then_some(rect)
+    }) else {
+        a.playback_menu = None;
+        return;
+    };
+    let count = menu.option_count();
+    let wanted = count as u16 + 2;
+    let above = anchor.y.saturating_sub(area.y);
+    let below = area.bottom().saturating_sub(anchor.bottom());
+    let open_above = below < wanted && above > below;
+    let height = wanted.min(if open_above { above } else { below });
+    if height < 3 {
+        a.playback_menu = None;
+        return;
+    }
+    let y = if open_above {
+        anchor.y - height
+    } else {
+        anchor.bottom()
+    };
+    let title = match menu {
+        PlaybackMenu::Mode => a.text("播放模式", "Playback mode"),
+        PlaybackMenu::Effect => a.text("音效", "Audio effects"),
+    };
+    let english = a.config.english;
+    let label_width = (0..count)
+        .map(|index| Line::from(menu.label(index, english)).width())
+        .max()
+        .unwrap_or_default();
+    let width = ((label_width + 4).max(Line::from(title).width() + 4) as u16)
+        .max(anchor.width)
+        .min(area.width);
+    let rect = Rect::new(anchor.x.min(area.right() - width), y, width, height);
+    a.hits.push((rect, Action::PlaybackMenuSurface));
+    f.render_widget(Clear, rect);
+    let block = pane(title.into(), p, true);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let visible = usize::from(inner.height);
+    let offset = offset.min(count - visible);
+    a.playback_menu = Some((menu, offset));
+    let selected = menu.selected(&a.config);
+    for row in 0..visible {
+        let index = offset + row;
+        let active = index == selected;
+        let mark = if active { "✓ " } else { "  " };
+        let style = if active {
+            Style::default().fg(p.accent).bg(p.selected)
+        } else {
+            Style::default().fg(p.fg)
+        };
+        let item = line(inner, row as u16);
+        f.render_widget(
+            Paragraph::new(format!("{mark}{}", menu.label(index, english))).style(style),
+            item,
+        );
+        a.hits.push((item, Action::SelectPlaybackOption(index)));
+    }
+    if visible < count {
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            rect,
+            &mut ScrollbarState::new(count - visible + 1)
+                .position(offset)
+                .viewport_content_length(visible),
+        );
     }
 }
 fn tabs(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
@@ -1518,13 +1621,7 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             "[ / ]",
             a.text("播放队列上一首 / 下一首", "Previous / next track in queue"),
         ),
-        (
-            "E / Shift+E",
-            a.text(
-                "音效：原声 / 低音 / 现场 / Livehouse / 律动 / 空间3D",
-                "Effects: original / bass / live / Livehouse / club / 3D space",
-            ),
-        ),
+        ("E / Shift+E", a.text("切换音效预设", "Cycle audio effects")),
         ("S", a.text("停止播放", "Stop playback")),
         (
             "Alt+↑ / ↓",

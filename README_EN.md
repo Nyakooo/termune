@@ -47,7 +47,7 @@ Runs on **Windows, macOS, and Linux**, and is built with Rust. Termune is an ind
 | Playback controls | Play, pause, stop, skip tracks, seek, and adjust volume |
 | Playback modes | Sequential, repeat all, repeat one, and shuffle |
 | Lyrics | Synchronized timestamped lyrics, manual browsing, and lyric seeking |
-| Audio effects | Multiple built-in sound presets, switchable during playback |
+| Audio effects | Six built-in presets, including 3D Space and Panorama surround, switchable during playback |
 | Multiple layouts | Professional layouts and a minimal mode, with themes and localization |
 | Automatic login | Store session credentials in the operating system credential store |
 | Remember position | Restore the previous library category, page, and selection |
@@ -184,7 +184,7 @@ The six categories are Albums, Artists, Genres, All Songs, Favorites, and Playli
 | `E` | Next audio preset |
 | `Shift+E` | Previous audio preset |
 
-Playback modes include sequential, repeat all, repeat one, and shuffle. You can also click or drag the progress bar and adjust volume from the player UI.
+Playback modes include sequential, repeat all, repeat one, and shuffle. Click the mode or effect in the player to open its menu and select an option directly. A checkmark identifies the current choice. Use the mouse wheel if the list exceeds the available space. You can also click or drag the progress bar or volume scale.
 
 ### Interface, lyrics, and settings
 

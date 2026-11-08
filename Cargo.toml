@@ -1,6 +1,6 @@
 [package]
 name = "termune"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 description = "Terminal library browser for Feiniu Music"
 license = "MIT"

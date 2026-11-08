@@ -9,6 +9,8 @@ pub enum Mode {
     Shuffle,
 }
 impl Mode {
+    pub const ALL: [Self; 4] = [Self::Sequence, Self::Loop, Self::RepeatOne, Self::Shuffle];
+
     pub fn next(self) -> Self {
         match self {
             Self::Sequence => Self::Loop,

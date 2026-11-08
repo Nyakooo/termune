@@ -172,6 +172,9 @@ pub enum Action {
     CycleMode,
     CycleEffect,
     CycleEffectBack,
+    TogglePlaybackMenu(PlaybackMenu),
+    PlaybackMenuSurface,
+    SelectPlaybackOption(usize),
     Volume(i16),
     VolumeAt(u16, u16),
     Favorite,
@@ -185,6 +188,38 @@ pub enum Action {
     FollowLyrics,
     Search,
     Refresh,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackMenu {
+    Mode,
+    Effect,
+}
+
+impl PlaybackMenu {
+    pub fn option_count(self) -> usize {
+        match self {
+            Self::Mode => crate::queue::Mode::ALL.len(),
+            Self::Effect => crate::effects::Effect::COUNT,
+        }
+    }
+
+    pub fn selected(self, config: &Config) -> usize {
+        match self {
+            Self::Mode => crate::queue::Mode::ALL
+                .iter()
+                .position(|&mode| mode == config.playback_mode)
+                .unwrap_or_default(),
+            Self::Effect => config.audio_effect,
+        }
+    }
+
+    pub fn label(self, index: usize, english: bool) -> &'static str {
+        match self {
+            Self::Mode => crate::queue::Mode::ALL[index].label(english),
+            Self::Effect => crate::effects::Effect::from_index(index).label(english),
+        }
+    }
 }
 
 pub struct VolumeDrag {
@@ -235,6 +270,7 @@ pub struct App {
     pub editing: bool,
     pub settings: Option<usize>,
     pub help: bool,
+    pub playback_menu: Option<(PlaybackMenu, usize)>,
     pub search_input: String,
     pub busy: bool,
     pub stage: &'static str,
@@ -653,6 +689,7 @@ impl App {
             editing: false,
             settings: None,
             help: false,
+            playback_menu: None,
             search_input: String::new(),
             busy: false,
             stage: "",
@@ -1505,7 +1542,9 @@ impl App {
     fn cycle_effect(&mut self, direction: isize) {
         let count = crate::effects::Effect::COUNT as isize;
         let effect = (self.config.audio_effect as isize + count + direction) % count;
-        let effect = effect as usize;
+        self.set_effect(effect as usize);
+    }
+    fn set_effect(&mut self, effect: usize) {
         if let Some(player) = self.player.as_mut() {
             player.set_effect(effect);
         }
@@ -1537,6 +1576,24 @@ impl App {
             Action::CycleMode => {
                 self.config.playback_mode = self.config.playback_mode.next();
                 self.save();
+            }
+            Action::TogglePlaybackMenu(menu) => {
+                self.playback_menu = match self.playback_menu {
+                    Some((open, _)) if open == menu => None,
+                    _ => Some((menu, menu.selected(&self.config))),
+                };
+            }
+            Action::PlaybackMenuSurface => {}
+            Action::SelectPlaybackOption(index) => {
+                if let Some((menu, _)) = self.playback_menu.take() {
+                    match menu {
+                        PlaybackMenu::Mode => {
+                            self.config.playback_mode = crate::queue::Mode::ALL[index];
+                            self.save();
+                        }
+                        PlaybackMenu::Effect => self.set_effect(index),
+                    }
+                }
             }
             Action::Favorite => self.favorite(),
             Action::PlaylistNew => self.new_playlist(None),
@@ -1668,6 +1725,9 @@ impl App {
     }
     fn key(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if self.playback_menu.take().is_some() && key.code == KeyCode::Esc {
             return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -1999,6 +2059,22 @@ impl App {
                         .rev()
                         .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
                         .map(|(_, a)| *a);
+                    if self.playback_menu.is_some()
+                        || matches!(action, Some(Action::TogglePlaybackMenu(_)))
+                    {
+                        self.last_click = None;
+                        match action {
+                            Some(
+                                action @ (Action::TogglePlaybackMenu(_)
+                                | Action::PlaybackMenuSurface
+                                | Action::SelectPlaybackOption(_)),
+                            ) => {
+                                self.action(action);
+                            }
+                            _ => self.playback_menu = None,
+                        }
+                        return;
+                    }
                     let now = Instant::now();
                     let double = self.last_click.take().is_some_and(|(x, y, time)| {
                         x == mouse.column
@@ -2016,6 +2092,18 @@ impl App {
                             self.action(Action::Select);
                         }
                     }
+                }
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                    if let Some((menu, offset)) = &mut self.playback_menu =>
+                {
+                    let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                        1
+                    } else {
+                        -1
+                    };
+                    *offset = offset
+                        .saturating_add_signed(delta)
+                        .min(menu.option_count() - 1);
                 }
                 MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                     if self.playlist_dialog.is_some() =>

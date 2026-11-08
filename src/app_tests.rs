@@ -1151,6 +1151,80 @@ fn library_tabs_have_natural_width_and_remember_category() {
 }
 
 #[test]
+fn playback_menus_select_options_directly_and_scroll_in_a_small_terminal() {
+    let mut app = app();
+    app.connected = true;
+    let mouse = |kind, rect: Rect| {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let click = |rect| mouse(MouseEventKind::Down(MouseButton::Left), rect);
+    let button = |app: &App, menu| {
+        app.hits
+            .iter()
+            .find_map(|&(rect, action)| {
+                matches!(action, Action::TogglePlaybackMenu(kind) if kind == menu).then_some(rect)
+            })
+            .unwrap()
+    };
+    let option = |app: &App, index| {
+        app.hits.iter().find_map(|&(rect, action)| {
+            matches!(action, Action::SelectPlaybackOption(i) if i == index).then_some(rect)
+        })
+    };
+
+    render(&mut app, 100, 30);
+    app.event(click(button(&app, PlaybackMenu::Mode)));
+    let screen = render(&mut app, 100, 30);
+    assert!(screen.contains("✓ 顺序播放"));
+    assert!((0..PlaybackMenu::Mode.option_count()).all(|i| option(&app, i).is_some()));
+    app.event(click(option(&app, 3).unwrap()));
+    assert_eq!(app.config.playback_mode, crate::queue::Mode::Shuffle);
+    assert!(app.playback_menu.is_none());
+
+    let compact = render(&mut app, 36, 20);
+    assert!(compact.contains("O ▾"));
+    assert!(compact.contains("E ▾"));
+    let effect_button = button(&app, PlaybackMenu::Effect);
+    app.event(click(effect_button));
+    let screen = render(&mut app, 36, 20);
+    let last_effect = crate::effects::Effect::COUNT - 1;
+    assert!(screen.contains("✓ 原声"));
+    assert!(option(&app, last_effect).is_none());
+    let popup = app
+        .hits
+        .iter()
+        .find_map(|&(rect, action)| matches!(action, Action::PlaybackMenuSurface).then_some(rect))
+        .unwrap();
+    app.event(click(Rect::new(popup.right() - 1, popup.y + 1, 1, 1)));
+    assert!(app.playback_menu.is_some());
+    for _ in 0..last_effect {
+        app.event(mouse(MouseEventKind::ScrollDown, effect_button));
+        render(&mut app, 36, 20);
+    }
+    app.event(click(option(&app, last_effect).unwrap()));
+    assert_eq!(app.config.audio_effect, last_effect);
+    assert!(app.playback_menu.is_none());
+
+    render(&mut app, 36, 20);
+    app.event(click(button(&app, PlaybackMenu::Effect)));
+    let last_label = PlaybackMenu::Effect.label(last_effect, false);
+    assert!(render(&mut app, 36, 20).contains(&format!("✓ {last_label}")));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.playback_menu.is_none());
+    render(&mut app, 36, 20);
+    app.event(click(button(&app, PlaybackMenu::Mode)));
+    render(&mut app, 36, 20);
+    app.event(click(Rect::new(0, 0, 1, 1)));
+    assert!(app.playback_menu.is_none());
+    assert_eq!(app.config.playback_mode, crate::queue::Mode::Shuffle);
+}
+
+#[test]
 fn effect_shortcut_cycles_all_presets_and_saves_selection() {
     let mut app = app();
     app.connected = true;

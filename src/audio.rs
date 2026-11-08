@@ -9,6 +9,7 @@ use std::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 use symphonia::core::io::MediaSource;
 use termune::Result;
@@ -21,6 +22,16 @@ struct Playback {
     seekable: bool,
     seek: Option<f64>,
     eof: bool,
+    dsp_tail_pending: bool,
+    queued_until: Option<Instant>,
+}
+impl Playback {
+    fn finished(&self) -> bool {
+        self.eof
+            && self.samples.is_empty()
+            && !self.dsp_tail_pending
+            && self.queued_until.is_none_or(|end| Instant::now() >= end)
+    }
 }
 struct Shared {
     playback: Mutex<Playback>,
@@ -71,15 +82,27 @@ impl Shared {
         }
     }
 
-    fn take(&self, output: &mut [[f32; 2]], dsp: &mut Processor) {
+    fn take(&self, output: &mut [[f32; 2]], dsp: &mut Processor, queued_until: Option<Instant>) {
         let effect = self.effect.load(Ordering::Relaxed);
         let volume = self.volume.load(Ordering::Relaxed);
         let mut state = self.playback.lock().unwrap_or_else(|e| e.into_inner());
         if self.reset.swap(false, Ordering::Relaxed) {
             dsp.reset(effect, volume);
+            state.queued_until = None;
         }
-        dsp.set(effect, volume);
+        // Finish draining the current preset before honoring a change for the next track.
+        if !state.eof || !state.samples.is_empty() {
+            dsp.set(effect, volume);
+        } else {
+            dsp.set_volume(volume);
+        }
         let paused = self.paused.load(Ordering::Relaxed);
+        if !paused
+            && !output.is_empty()
+            && (!state.samples.is_empty() || state.eof && dsp.has_tail())
+        {
+            state.queued_until = state.queued_until.max(queued_until);
+        }
         for frame in output {
             *frame = if paused {
                 dsp.render(None)
@@ -91,10 +114,12 @@ impl Shared {
                         self.rendered.fetch_add(1, Ordering::Relaxed);
                         dsp.render(Some(sample))
                     }
+                    None if state.eof => dsp.drain(),
                     None => dsp.render(None),
                 }
             };
         }
+        state.dsp_tail_pending = dsp.has_tail();
         drop(state);
         self.wake.notify_all();
     }
@@ -180,7 +205,7 @@ impl Decoder {
                 let mut dsp = Processor::new(rate, effect, volume);
                 let mut frames = vec![[0.0; 2]; rate as usize / 100];
                 while !shared.closing.load(Ordering::Relaxed) {
-                    shared.take(&mut frames, &mut dsp);
+                    shared.take(&mut frames, &mut dsp, None);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             }))
@@ -248,7 +273,7 @@ impl Decoder {
             .playback
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        (state.eof && state.samples.is_empty()).then_some(Ok(()))
+        state.finished().then_some(Ok(()))
     }
 }
 impl Drop for Decoder {
@@ -282,20 +307,31 @@ fn output_with_config<T: cpal::SizedSample + cpal::FromSample<f32>>(
 ) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
     let errors = shared.clone();
-    let mut dsp = Processor::new(
+    let mut dsp = Processor::for_output(
         shared.rate,
         shared.effect.load(Ordering::Relaxed),
         shared.volume.load(Ordering::Relaxed),
+        config.channels,
     );
     // Fixed scratch storage; no allocation in the audio callback.
     let mut scratch = [[0.0; 2]; 1024];
     let stream = device
         .build_output_stream(
             config,
-            move |data: &mut [T], _| {
+            move |data: &mut [T], info| {
+                // The device may still be playing this buffer after the DSP has drained.
+                let timestamp = info.timestamp();
+                let delay = timestamp
+                    .playback
+                    .duration_since(&timestamp.callback)
+                    .unwrap_or_default();
+                let length = Duration::from_secs_f64(
+                    (data.len() / channels) as f64 / f64::from(shared.rate),
+                );
+                let queued_until = Instant::now().checked_add(delay.saturating_add(length));
                 for chunk in data.chunks_mut(channels * 1024) {
                     let frames = chunk.len() / channels;
-                    shared.take(&mut scratch[..frames], &mut dsp);
+                    shared.take(&mut scratch[..frames], &mut dsp, queued_until);
                     for (frame, sample) in chunk.chunks_mut(channels).zip(&scratch[..frames]) {
                         for (c, value) in frame.iter_mut().enumerate() {
                             *value = T::from_sample(if channels == 1 {
@@ -326,7 +362,6 @@ fn output_with_config<T: cpal::SizedSample + cpal::FromSample<f32>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn new_effect_replaces_pcm_processing_in_the_first_output_block() {
@@ -342,10 +377,10 @@ mod tests {
             [sample; 2]
         });
         switched.push(frames.clone());
-        switched.take(&mut output, &mut switched_dsp);
+        switched.take(&mut output, &mut switched_dsp, None);
 
         switched.effect.store(effect, Ordering::Relaxed);
-        switched.take(&mut output, &mut switched_dsp);
+        switched.take(&mut output, &mut switched_dsp, None);
         for (frame, input) in output.into_iter().zip(frames.skip(480)) {
             assert_eq!(frame, target_dsp.render(Some(input)));
         }
@@ -372,7 +407,7 @@ mod tests {
                     .collect();
                 shared.push(samples.iter().copied());
                 let mut output = [[0.0; 2]; 480];
-                shared.take(&mut output, &mut dsp);
+                shared.take(&mut output, &mut dsp, None);
                 if block > 40 {
                     for (input, output) in samples.iter().zip(output) {
                         for c in 0..2 {
@@ -397,8 +432,66 @@ mod tests {
         let shared = Shared::new(48000, 0, 100);
         shared.push([[0.25, -0.5], [-0.125, 0.375]].into_iter());
         let mut output = [[0.0; 2]; 2];
-        shared.take(&mut output, &mut Processor::new(48000, 0, 100));
+        shared.take(&mut output, &mut Processor::new(48000, 0, 100), None);
         assert_eq!(output, [[0.25, -0.5], [-0.125, 0.375]]);
+    }
+
+    #[test]
+    fn eof_drains_delayed_audio_without_advancing_playback_time() {
+        use crate::effects::Effect;
+
+        for effect in [Effect::Space3D, Effect::Panorama] {
+            let effect = effect as usize;
+            let shared = Shared::new(48_000, effect, 100);
+            let mut dsp = Processor::new(48_000, effect, 100);
+            shared.push([[0.0, 0.1]].into_iter());
+            shared.playback.lock().unwrap().eof = true;
+            let mut first = [[0.0; 2]; 1];
+            shared.take(&mut first, &mut dsp, None);
+            assert_eq!(first[0][1], 0.0);
+            assert!(!shared.playback.lock().unwrap().finished());
+
+            shared.paused.store(true, Ordering::Relaxed);
+            let mut tail = [[0.0; 2]; 1600];
+            shared.take(&mut tail, &mut dsp, None);
+            assert!(tail.iter().all(|frame| frame[1] == 0.0));
+            assert!(!shared.playback.lock().unwrap().finished());
+
+            shared.paused.store(false, Ordering::Relaxed);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            shared.take(&mut tail, &mut dsp, Some(deadline));
+            assert!(tail.iter().any(|frame| frame[1].abs() > 0.05));
+            shared.take(&mut tail, &mut dsp, Some(deadline + Duration::from_secs(1)));
+            let mut state = shared.playback.lock().unwrap();
+            assert_eq!(state.queued_until, Some(deadline));
+            assert!(!state.finished());
+            assert_eq!(state.position, 1);
+            state.queued_until = Some(Instant::now());
+            assert!(state.finished());
+        }
+    }
+
+    #[test]
+    fn eof_tail_uses_the_current_volume_and_finishes_with_the_active_effect() {
+        let effect = crate::effects::Effect::Space3D as usize;
+        let drain_peak = |volume| {
+            let shared = Shared::new(48_000, effect, 100);
+            let mut dsp = Processor::new(48_000, effect, 100);
+            shared.push([[0.0, 0.1]].into_iter());
+            shared.playback.lock().unwrap().eof = true;
+            shared.take(&mut [[0.0; 2]; 1], &mut dsp, None);
+
+            shared.effect.store(0, Ordering::Relaxed);
+            shared.volume.store(volume, Ordering::Relaxed);
+            let mut tail = [[0.0; 2]; 1152];
+            shared.take(&mut tail, &mut dsp, None);
+            assert!(shared.playback.lock().unwrap().finished());
+            tail[1151][1]
+        };
+
+        let full = drain_peak(100);
+        assert!(full > 0.05);
+        assert!(drain_peak(0) < full * 0.1);
     }
 
     #[test]

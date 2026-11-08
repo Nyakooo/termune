@@ -6,7 +6,7 @@ import re
 
 ROOT = Path(__file__).resolve().parent.parent
 TAG_PATTERN = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
-HEADING_PATTERN = re.compile(r"^# Termune (v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+HEADING_PATTERN = re.compile(rf"(?:## |# Termune )({TAG_PATTERN.pattern})")
 
 
 def extract_release_notes(tag: str, source: Path) -> str:
@@ -20,7 +20,7 @@ def extract_release_notes(tag: str, source: Path) -> str:
     ]
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one '# Termune {tag}' section in {source}, found {len(matches)}"
+            f"Expected exactly one release heading for {tag} in {source}, found {len(matches)}"
         )
 
     start = matches[0]

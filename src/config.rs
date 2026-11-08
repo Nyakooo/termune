@@ -43,7 +43,7 @@ impl Default for Config {
             allow_lan_http: false,
             volume: 100,
             audio_effect: 0,
-            effect_version: Some(1),
+            effect_version: Some(3),
             last_category: "album".into(),
             remember_location: true,
             browse_locations: BTreeMap::new(),
@@ -70,6 +70,24 @@ impl Config {
                 _ => 0,
             };
             self.effect_version = Some(1);
+        }
+        if self.effect_version == Some(1) {
+            // Keep the old stage sound, now named Livehouse, and retire its short-room variant.
+            self.audio_effect = match self.audio_effect {
+                3 => 2,
+                index @ 4..=7 => index - 1,
+                index => index,
+            };
+            self.effect_version = Some(2);
+        }
+        if self.effect_version == Some(2) {
+            // Both former spatial presets now select the renamed Space 3D preset.
+            self.audio_effect = match self.audio_effect {
+                5 => 4,
+                6 => 5,
+                index => index,
+            };
+            self.effect_version = Some(3);
         }
     }
     pub fn load() -> Result<Self> {
@@ -125,10 +143,29 @@ mod tests {
         let mut config: Config = toml::from_str("audio_effect = 6").unwrap();
         assert!(config.effect_version.is_none());
         config.migrate_effects();
-        assert_eq!(config.audio_effect, 5);
-        assert_eq!(config.effect_version, Some(1));
-        config.audio_effect = 4;
+        assert_eq!(config.audio_effect, 4);
+        assert_eq!(config.effect_version, Some(3));
         config.migrate_effects();
         assert_eq!(config.audio_effect, 4);
+    }
+
+    #[test]
+    fn saved_effect_indices_migrate_once() {
+        for (version, indices) in [
+            (1, [0, 1, 2, 2, 3, 4, 4, 5].as_slice()),
+            (2, [0, 1, 2, 3, 4, 4, 5].as_slice()),
+        ] {
+            for (index, &expected) in indices.iter().enumerate() {
+                let mut config: Config = toml::from_str(&format!(
+                    "audio_effect = {index}\neffect_version = {version}"
+                ))
+                .unwrap();
+                config.migrate_effects();
+                assert_eq!(config.audio_effect, expected);
+                assert_eq!(config.effect_version, Some(3));
+                config.migrate_effects();
+                assert_eq!(config.audio_effect, expected);
+            }
+        }
     }
 }
