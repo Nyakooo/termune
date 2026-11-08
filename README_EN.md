@@ -1,10 +1,12 @@
 # Termune
 
-[简体中文](README.md) | **English**
-
 ![Termune — Your NAS music, right in the terminal](docs/assets/termune-cover.svg)
 
+[简体中文](README.md) | **English**
+
 **Termune is a cross-platform terminal music player for Feiniu NAS.** Connect to your NAS from the terminal to browse your music library, search tracks, manage playlists, and play music — without opening a browser or a desktop music app.
+
+Lightweight and installation-free, Termune runs on Windows, macOS, and Linux. It discovers your NAS with FN ID, probes available connection routes, and prioritizes LAN connectivity.
 
 ## Real-world screenshots
 
