@@ -201,9 +201,9 @@ Termune 支持键盘和鼠标交互。以下是曲库界面的快捷键速查；
 
 - [GitHub Issues](https://github.com/Nyakooo/termune/issues)
 - [详细使用指南](docs/USAGE.md)
-- [飞牛接口与连接说明](docs/FEINIU_API.md)
+- [飞牛连接与兼容性](docs/FEINIU_API.md)
 - [更新记录](RELEASE_NOTES.md)
-- [音频组件许可](docs/AUDIO_LICENSES.md)
+- [音效说明](docs/AUDIO_EFFECTS_RESEARCH.md) · [音频组件许可](docs/AUDIO_LICENSES.md)
 
 ## 免责声明
 
