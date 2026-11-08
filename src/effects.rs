@@ -1,6 +1,6 @@
 //! Music DSP: RBJ shelving EQ, delayed low-pass crossfeed and a stereo
 //! Schroeder/Moorer reverb based on Jezar's public-domain Freeverb topology.
-//! See docs/AUDIO_EFFECTS_RESEARCH.md for algorithm references and scope.
+//! See docs/AUDIO_EFFECTS.md for algorithm references and scope.
 use std::f32::consts::PI;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
