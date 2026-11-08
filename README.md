@@ -2,7 +2,11 @@
 
 ![Termune — 让 NAS 音乐，在终端响起](docs/assets/termune-cover.svg)
 
+[简体中文](README.md) | [English](README_EN.md)
+
 **Termune 是一款面向飞牛 NAS 音乐的跨平台终端播放器。** 无需打开浏览器或桌面音乐客户端，在终端中即可连接自己的 NAS，浏览曲库、搜索歌曲、管理歌单并播放音乐。
+
+![Termune running on macOS](docs/assets/termune-desktop.png)
 
 支持 **Windows、macOS 和 Linux**，使用 Rust 构建。Termune 是独立开发的第三方客户端，与飞牛官方没有隶属、合作或背书关系。
 
