@@ -987,7 +987,7 @@ fn volume_control(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     let level = format!(" {volume:3}% + ");
     let level_width = Line::from(level.as_str()).width() as u16;
     let button_width = 3;
-    let bar_width = r.width.saturating_sub(button_width + level_width).min(12);
+    let bar_width = r.width.saturating_sub(button_width + level_width).min(10);
     if bar_width < 2 || r.height == 0 {
         return;
     }

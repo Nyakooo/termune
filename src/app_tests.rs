@@ -1080,7 +1080,7 @@ fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
     app.config.volume = 100;
     let (player, playback_volume) = crate::player::Player::volume_probe(100);
     app.player = Some(player);
-    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▰▰▰▰▰▰▰ 100% +"));
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▰▰▰▰▰ 100% +"));
     let bar = app
         .hits
         .iter()
@@ -1089,7 +1089,7 @@ fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
             _ => None,
         })
         .expect("volume meter has clickable cells");
-    assert_eq!(bar.width, 12);
+    assert_eq!(bar.width, 10);
     let mouse = |kind, column| {
         Event::Mouse(crossterm::event::MouseEvent {
             kind,
@@ -1109,8 +1109,8 @@ fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
     app.event(mouse(MouseEventKind::Down(MouseButton::Left), left));
     app.event(mouse(MouseEventKind::Drag(MouseButton::Left), right));
     assert_eq!(playback_volume(), 100);
-    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), left + 5));
-    assert_eq!(playback_volume(), 45);
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), left + 4));
+    assert_eq!(playback_volume(), 44);
     assert_eq!(app.config.volume, 0);
     let saved_volume = |app: &App| {
         let path = app.config.path_override.as_ref().unwrap();
@@ -1118,20 +1118,20 @@ fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
         saved.volume
     };
     assert_eq!(saved_volume(&app), 0);
-    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▰▱▱▱▱▱▱  45% +"));
-    app.event(mouse(MouseEventKind::Up(MouseButton::Left), left + 5));
-    assert_eq!(app.config.volume, 45);
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▱▱▱▱▱  44% +"));
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), left + 4));
+    assert_eq!(app.config.volume, 44);
 
     app.event(mouse(MouseEventKind::Down(MouseButton::Left), right));
     assert_eq!(playback_volume(), 100);
     app.event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
     assert_eq!(playback_volume(), 0);
     key(&mut app, KeyCode::Esc);
-    assert_eq!(playback_volume(), 45);
+    assert_eq!(playback_volume(), 44);
     app.event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
-    assert_eq!(app.config.volume, 45);
+    assert_eq!(app.config.volume, 44);
 
-    assert_eq!(saved_volume(&app), 45);
+    assert_eq!(saved_volume(&app), 44);
     std::fs::remove_file(app.config.path_override.as_ref().unwrap()).unwrap();
 }
 
