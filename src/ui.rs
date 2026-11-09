@@ -982,11 +982,7 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             Action::TogglePlaybackMenu(PlaybackMenu::Effect),
             p,
         );
-        let volume = a
-            .volume_drag
-            .as_ref()
-            .and_then(|drag| drag.preview)
-            .unwrap_or(a.config.volume.min(100));
+        let volume = a.volume();
         let filled = usize::from(volume).div_ceil(20);
         let label = format!(
             "− {}{} {}% +",
@@ -994,10 +990,19 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             "▱".repeat(5 - filled),
             volume
         );
-        let halves = Layout::horizontal([Constraint::Percentage(50); 2]).split(controls[2]);
-        text(f, controls[2], label, p.accent);
-        a.hits.push((halves[0], Action::Volume(-5)));
-        a.hits.push((halves[1], Action::Volume(5)));
+        let control = controls[2];
+        let label_width = Line::from(label.as_str()).width() as u16;
+        text(f, control, label, p.accent);
+        if control.width > 0 {
+            a.hits
+                .push((Rect::new(control.x, control.y, 1, 1), Action::Volume(-5)));
+        }
+        if control.width >= label_width {
+            a.hits.push((
+                Rect::new(control.x + label_width - 1, control.y, 1, 1),
+                Action::Volume(5),
+            ));
+        }
 
         let bar = controls[2].intersection(Rect::new(
             controls[2].x.saturating_add(2),

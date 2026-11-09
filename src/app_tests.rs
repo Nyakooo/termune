@@ -1050,12 +1050,38 @@ fn volume_keys_work_in_settings_and_match_mouse_actions() {
 }
 
 #[test]
-fn original_volume_meter_supports_click_drag_and_cancel() {
+fn volume_buttons_follow_the_rendered_symbols() {
+    let mut app = app();
+    app.connected = true;
+    app.config.volume = 90;
+    for (symbol, volume) in [('+', 95), ('+', 100), ('−', 95)] {
+        let screen = render(&mut app, 200, 36);
+        let (row, line) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("− ▰"))
+            .unwrap();
+        let column = ratatui::text::Line::from(&line[..line.rfind(symbol).unwrap()]).width();
+        app.event(Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: column as u16,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.config.volume, volume);
+    }
+    std::fs::remove_file(app.config.path_override.as_ref().unwrap()).unwrap();
+}
+
+#[test]
+fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
     let mut app = app();
     app.connected = true;
     app.config.volume = 45;
     assert!(render(&mut app, 120, 36).contains("− ▰▰▰▱▱ 45% +"));
     app.config.volume = 100;
+    let (player, playback_volume) = crate::player::Player::volume_probe(100);
+    app.player = Some(player);
     assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰ 100% +"));
     let point = app
         .hits
@@ -1073,26 +1099,34 @@ fn original_volume_meter_supports_click_drag_and_cancel() {
     app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
     app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x));
     assert_eq!(app.config.volume, 75);
+    assert_eq!(playback_volume(), 75);
 
     app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), point.x + 1));
+    assert_eq!(playback_volume(), 80);
     app.event(mouse(MouseEventKind::Drag(MouseButton::Left), point.x - 2));
+    assert_eq!(playback_volume(), 65);
     assert_eq!(app.config.volume, 75);
+    let saved_volume = |app: &App| {
+        let path = app.config.path_override.as_ref().unwrap();
+        let saved: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        saved.volume
+    };
+    assert_eq!(saved_volume(&app), 75);
     assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▱ 65% +"));
     app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x - 2));
     assert_eq!(app.config.volume, 65);
 
     app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
     app.event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
-    assert_eq!(app.volume_drag.as_ref().unwrap().preview, Some(0));
+    assert_eq!(playback_volume(), 0);
     key(&mut app, KeyCode::Esc);
-    assert!(app.volume_drag.is_none());
+    assert_eq!(playback_volume(), 65);
     app.event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
     assert_eq!(app.config.volume, 65);
 
-    let path = app.config.path_override.as_ref().unwrap();
-    let saved: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(saved.volume, 65);
-    std::fs::remove_file(path).unwrap();
+    assert_eq!(saved_volume(&app), 65);
+    std::fs::remove_file(app.config.path_override.as_ref().unwrap()).unwrap();
 }
 
 #[test]

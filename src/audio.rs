@@ -138,6 +138,20 @@ pub struct Decoder {
     sink: Option<std::thread::JoinHandle<()>>,
 }
 impl Decoder {
+    #[cfg(test)]
+    pub(crate) fn volume_probe(volume: u16) -> (Self, impl Fn() -> u16) {
+        let shared = Arc::new(Shared::new(48_000, 0, volume));
+        let probe = shared.clone();
+        (
+            Self {
+                shared,
+                _stream: None,
+                sink: None,
+            },
+            move || probe.volume.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn start(source: termune::stream::AudioSource, effect: usize, volume: u16) -> Result<Self> {
         Self::start_mode(move || source.open(), effect, volume, cfg!(test))
     }

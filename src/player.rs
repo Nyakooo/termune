@@ -11,6 +11,20 @@ pub struct Player {
     pub timeline: Timeline,
 }
 impl Player {
+    #[cfg(test)]
+    pub(crate) fn volume_probe(volume: u16) -> (Self, impl Fn() -> u16) {
+        let (decoder, probe) = crate::audio::Decoder::volume_probe(volume);
+        (
+            Self {
+                decoder,
+                title: String::new(),
+                paused: false,
+                timeline: Timeline::default(),
+            },
+            probe,
+        )
+    }
+
     pub fn start(
         source: termune::stream::AudioSource,
         title: String,

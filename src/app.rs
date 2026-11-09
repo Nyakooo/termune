@@ -222,11 +222,11 @@ impl PlaybackMenu {
     }
 }
 
-pub struct VolumeDrag {
+struct VolumeDrag {
     column: u16,
     initial: u16,
     click: u16,
-    pub preview: Option<u16>,
+    preview: Option<u16>,
 }
 
 struct TimedMessage {
@@ -289,7 +289,7 @@ pub struct App {
     lyrics_resume_at: Option<Instant>,
     pub seek_drag: Option<f64>,
     pub seek_rect: Option<Rect>,
-    pub volume_drag: Option<VolumeDrag>,
+    volume_drag: Option<VolumeDrag>,
     playing_context: Option<PlaybackContext>,
     shuffle_history: Vec<PlaybackContext>,
     favorite_busy: bool,
@@ -875,6 +875,7 @@ impl App {
         self.follow_lyrics();
         self.media_cache.clear();
         self.stop_audio();
+        self.volume_drag = None;
         self.cancel();
         let _ = self.tx.send(Command::Logout);
         self.connected = false;
@@ -1077,7 +1078,7 @@ impl App {
                             response,
                             title,
                             self.config.audio_effect,
-                            self.config.volume.min(100),
+                            self.volume(),
                         )
                     }) {
                         Ok(player) => {
@@ -1531,10 +1532,27 @@ impl App {
         }
         self.save();
     }
-    fn set_volume(&mut self, volume: u16) {
+    pub fn volume(&self) -> u16 {
+        self.volume_drag
+            .as_ref()
+            .and_then(|drag| drag.preview)
+            .unwrap_or(self.config.volume.min(100))
+    }
+    fn apply_volume(&mut self, volume: u16) {
         if let Some(player) = self.player.as_mut() {
             player.set_volume(volume);
         }
+    }
+    fn cancel_volume_drag(&mut self) -> bool {
+        if self.volume_drag.take().is_some() {
+            self.apply_volume(self.config.volume.min(100));
+            true
+        } else {
+            false
+        }
+    }
+    fn set_volume(&mut self, volume: u16) {
+        self.apply_volume(volume);
         self.config.volume = volume;
         self.show_status(format!("音量 / Volume: {volume}%"), false);
         self.save();
@@ -1554,7 +1572,7 @@ impl App {
     fn action(&mut self, action: Action) {
         match action {
             Action::Seek(fraction) => {
-                self.volume_drag = None;
+                self.cancel_volume_drag();
                 self.seek_drag = Some(fraction.clamp(0.0, 1.0));
             }
             Action::Volume(delta) => {
@@ -1564,6 +1582,7 @@ impl App {
             }
             Action::VolumeAt(volume, column) => {
                 self.seek_drag = None;
+                self.cancel_volume_drag();
                 self.volume_drag = Some(VolumeDrag {
                     column,
                     initial: self.config.volume.min(100),
@@ -1707,7 +1726,7 @@ impl App {
         self.search_input.clear();
     }
     fn back(&mut self) {
-        if self.seek_drag.take().is_some() || self.volume_drag.take().is_some() {
+        if self.seek_drag.take().is_some() || self.cancel_volume_drag() {
             return;
         }
 
@@ -2037,6 +2056,8 @@ impl App {
                         let volume = drag.preview.unwrap_or(drag.click);
                         self.volume_drag = None;
                         self.set_volume(volume);
+                    } else if let Some(volume) = drag.preview {
+                        self.apply_volume(volume);
                     }
                 } else if let Some(rect) = self.seek_rect {
                     let fraction = bar_fraction(rect, mouse.column);
