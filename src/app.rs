@@ -176,7 +176,7 @@ pub enum Action {
     PlaybackMenuSurface,
     SelectPlaybackOption(usize),
     Volume(i16),
-    VolumeAt(u16, u16),
+    VolumeAt(Rect, u16),
     Favorite,
     PlaylistNew,
     PlaylistRename,
@@ -223,10 +223,8 @@ impl PlaybackMenu {
 }
 
 struct VolumeDrag {
-    column: u16,
-    initial: u16,
-    click: u16,
-    preview: Option<u16>,
+    bar: Rect,
+    preview: u16,
 }
 
 struct TimedMessage {
@@ -1535,7 +1533,7 @@ impl App {
     pub fn volume(&self) -> u16 {
         self.volume_drag
             .as_ref()
-            .and_then(|drag| drag.preview)
+            .map(|drag| drag.preview)
             .unwrap_or(self.config.volume.min(100))
     }
     fn apply_volume(&mut self, volume: u16) {
@@ -1580,15 +1578,11 @@ impl App {
                 self.volume_drag = None;
                 self.set_volume(volume);
             }
-            Action::VolumeAt(volume, column) => {
+            Action::VolumeAt(bar, column) => {
                 self.seek_drag = None;
-                self.cancel_volume_drag();
-                self.volume_drag = Some(VolumeDrag {
-                    column,
-                    initial: self.config.volume.min(100),
-                    click: volume,
-                    preview: None,
-                });
+                let preview = volume_at(bar, column);
+                self.volume_drag = Some(VolumeDrag { bar, preview });
+                self.apply_volume(preview);
             }
             Action::CycleEffect => self.cycle_effect(1),
             Action::CycleEffectBack => self.cycle_effect(-1),
@@ -2046,17 +2040,12 @@ impl App {
             {
                 let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
                 if let Some(drag) = self.volume_drag.as_mut() {
-                    let offset = i32::from(mouse.column) - i32::from(drag.column);
-                    if offset != 0 || drag.preview.is_some() {
-                        // Allow fine adjustments beyond the five visible cells.
-                        drag.preview =
-                            Some((i32::from(drag.initial) + offset * 5).clamp(0, 100) as u16);
-                    }
+                    let volume = volume_at(drag.bar, mouse.column);
                     if released {
-                        let volume = drag.preview.unwrap_or(drag.click);
                         self.volume_drag = None;
                         self.set_volume(volume);
-                    } else if let Some(volume) = drag.preview {
+                    } else {
+                        drag.preview = volume;
                         self.apply_volume(volume);
                     }
                 } else if let Some(rect) = self.seek_rect {
@@ -2169,6 +2158,10 @@ impl App {
 pub fn bar_fraction(rect: Rect, column: u16) -> f64 {
     let span = rect.width.saturating_sub(1).max(1);
     f64::from(column.saturating_sub(rect.x).min(span)) / f64::from(span)
+}
+
+fn volume_at(bar: Rect, column: u16) -> u16 {
+    (bar_fraction(bar, column) * 100.0).round() as u16
 }
 
 struct TerminalGuard;

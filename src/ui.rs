@@ -560,7 +560,7 @@ enum PlayerLyrics {
 
 fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     if a.config.professional && (r.width < 72 || r.height < 18) {
-        let rows = Layout::vertical([Constraint::Length(8), Constraint::Min(3)])
+        let rows = Layout::vertical([Constraint::Length(9), Constraint::Min(3)])
             .spacing(1)
             .split(r);
         player_panel(f, a, rows[0], p, false, PlayerLyrics::Beside, None);
@@ -568,7 +568,7 @@ fn library_layout(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         return;
     }
     if !a.config.professional {
-        let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(5)])
+        let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(6)])
             .spacing(1)
             .split(r);
         library(f, a, rows[0], p, false, false);
@@ -664,6 +664,9 @@ fn player_panel(
     let inner = block.inner(r);
     f.render_widget(block, r);
     let inner = if boxed { inset(inner, 1, 0) } else { inner };
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+    let inner = rows[0];
+    volume_control(f, a, rows[1], p);
     let (state, title) = if let Some(title) = &a.audio_loading {
         (a.text("◌ 正在连接", "◌ CONNECTING"), title.clone())
     } else if let Some(player) = &a.player {
@@ -946,12 +949,7 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         }
     }
     if r.height >= 3 {
-        let controls = Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
-        ])
-        .split(line(r, 2));
+        let controls = Layout::horizontal([Constraint::Percentage(50); 2]).split(line(r, 2));
         let mode = format!("[ {} ▾ ]", a.config.playback_mode.label(a.config.english));
         let mode = if Line::from(mode.as_str()).width() <= usize::from(controls[0].width) {
             mode.as_str()
@@ -982,44 +980,41 @@ fn playback_controls(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             Action::TogglePlaybackMenu(PlaybackMenu::Effect),
             p,
         );
-        let volume = a.volume();
-        let filled = usize::from(volume).div_ceil(20);
-        let label = format!(
-            "− {}{} {}% +",
-            "▰".repeat(filled),
-            "▱".repeat(5 - filled),
-            volume
-        );
-        let control = controls[2];
-        let label_width = Line::from(label.as_str()).width() as u16;
-        text(f, control, label, p.accent);
-        if control.width > 0 {
-            a.hits
-                .push((Rect::new(control.x, control.y, 1, 1), Action::Volume(-5)));
-        }
-        if control.width >= label_width {
-            a.hits.push((
-                Rect::new(control.x + label_width - 1, control.y, 1, 1),
-                Action::Volume(5),
-            ));
-        }
-
-        let bar = controls[2].intersection(Rect::new(
-            controls[2].x.saturating_add(2),
-            controls[2].y,
-            5,
-            1,
-        ));
-        if bar.width > 1 {
-            for column in bar.x..bar.right() {
-                let volume = (bar_fraction(bar, column) * 100.0).round() as u16;
-                a.hits.push((
-                    Rect::new(column, bar.y, 1, 1),
-                    Action::VolumeAt(volume, column),
-                ));
-            }
-        }
     }
+}
+fn volume_control(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
+    let volume = a.volume();
+    let level = format!(" {volume:3}% + ");
+    let level_width = Line::from(level.as_str()).width() as u16;
+    let button_width = 3;
+    let bar_width = r.width.saturating_sub(button_width + level_width).min(12);
+    if bar_width < 2 || r.height == 0 {
+        return;
+    }
+    let minus = Rect::new(r.x, r.y, button_width, 1);
+    button(f, a, minus, " − ", Action::Volume(-5), p);
+    let bar = Rect::new(minus.right(), r.y, bar_width, 1);
+    let filled = (volume * bar_width).div_ceil(100);
+    for column in bar.x..bar.right() {
+        let cell = Rect::new(column, bar.y, 1, 1);
+        text(
+            f,
+            cell,
+            if column - bar.x < filled {
+                "▰"
+            } else {
+                "▱"
+            },
+            p.accent,
+        );
+        a.hits.push((cell, Action::VolumeAt(bar, column)));
+    }
+    let level_rect = Rect::new(bar.right(), r.y, level_width, 1);
+    text(f, level_rect, level, p.accent);
+    a.hits.push((
+        Rect::new(level_rect.right() - button_width, r.y, button_width, 1),
+        Action::Volume(5),
+    ));
 }
 fn playback_menu(f: &mut Frame, a: &mut App, area: Rect, p: Palette) {
     let Some((menu, offset)) = a.playback_menu else {

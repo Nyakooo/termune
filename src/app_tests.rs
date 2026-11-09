@@ -1050,21 +1050,21 @@ fn volume_keys_work_in_settings_and_match_mouse_actions() {
 }
 
 #[test]
-fn volume_buttons_follow_the_rendered_symbols() {
+fn volume_buttons_accept_clicks_next_to_the_symbols_at_narrow_widths() {
     let mut app = app();
     app.connected = true;
     app.config.volume = 90;
-    for (symbol, volume) in [('+', 95), ('+', 100), ('−', 95)] {
-        let screen = render(&mut app, 200, 36);
+    for (symbol, offset, volume) in [('+', -1, 95), ('+', 1, 100), ('−', 1, 95)] {
+        let screen = render(&mut app, 36, 20);
         let (row, line) = screen
             .lines()
             .enumerate()
             .find(|(_, line)| line.contains("− ▰"))
             .unwrap();
-        let column = ratatui::text::Line::from(&line[..line.rfind(symbol).unwrap()]).width();
+        let column = ratatui::text::Line::from(&line[..line.find(symbol).unwrap()]).width();
         app.event(Event::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: column as u16,
+            column: (column as u16).saturating_add_signed(offset),
             row: row as u16,
             modifiers: KeyModifiers::NONE,
         }));
@@ -1077,55 +1077,61 @@ fn volume_buttons_follow_the_rendered_symbols() {
 fn volume_meter_updates_playback_during_drag_and_saves_on_release() {
     let mut app = app();
     app.connected = true;
-    app.config.volume = 45;
-    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▱▱ 45% +"));
     app.config.volume = 100;
     let (player, playback_volume) = crate::player::Player::volume_probe(100);
     app.player = Some(player);
-    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰ 100% +"));
-    let point = app
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▰▰▰▰▰▰▰ 100% +"));
+    let bar = app
         .hits
         .iter()
-        .find_map(|(hit, action)| matches!(action, Action::VolumeAt(75, _)).then_some(*hit))
+        .find_map(|&(_, action)| match action {
+            Action::VolumeAt(bar, _) => Some(bar),
+            _ => None,
+        })
         .expect("volume meter has clickable cells");
+    assert_eq!(bar.width, 12);
     let mouse = |kind, column| {
         Event::Mouse(crossterm::event::MouseEvent {
             kind,
             column,
-            row: point.y,
+            row: bar.y,
             modifiers: KeyModifiers::NONE,
         })
     };
-    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
-    app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x));
-    assert_eq!(app.config.volume, 75);
-    assert_eq!(playback_volume(), 75);
+    let left = bar.x;
+    let right = bar.right() - 1;
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), left));
+    assert_eq!(playback_volume(), 0);
+    assert_eq!(app.config.volume, 100);
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), left));
+    assert_eq!(app.config.volume, 0);
 
-    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
-    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), point.x + 1));
-    assert_eq!(playback_volume(), 80);
-    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), point.x - 2));
-    assert_eq!(playback_volume(), 65);
-    assert_eq!(app.config.volume, 75);
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), left));
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), right));
+    assert_eq!(playback_volume(), 100);
+    app.event(mouse(MouseEventKind::Drag(MouseButton::Left), left + 5));
+    assert_eq!(playback_volume(), 45);
+    assert_eq!(app.config.volume, 0);
     let saved_volume = |app: &App| {
         let path = app.config.path_override.as_ref().unwrap();
         let saved: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         saved.volume
     };
-    assert_eq!(saved_volume(&app), 75);
-    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▱ 65% +"));
-    app.event(mouse(MouseEventKind::Up(MouseButton::Left), point.x - 2));
-    assert_eq!(app.config.volume, 65);
+    assert_eq!(saved_volume(&app), 0);
+    assert!(render(&mut app, 120, 36).contains("− ▰▰▰▰▰▰▱▱▱▱▱▱  45% +"));
+    app.event(mouse(MouseEventKind::Up(MouseButton::Left), left + 5));
+    assert_eq!(app.config.volume, 45);
 
-    app.event(mouse(MouseEventKind::Down(MouseButton::Left), point.x));
+    app.event(mouse(MouseEventKind::Down(MouseButton::Left), right));
+    assert_eq!(playback_volume(), 100);
     app.event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
     assert_eq!(playback_volume(), 0);
     key(&mut app, KeyCode::Esc);
-    assert_eq!(playback_volume(), 65);
+    assert_eq!(playback_volume(), 45);
     app.event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
-    assert_eq!(app.config.volume, 65);
+    assert_eq!(app.config.volume, 45);
 
-    assert_eq!(saved_volume(&app), 65);
+    assert_eq!(saved_volume(&app), 45);
     std::fs::remove_file(app.config.path_override.as_ref().unwrap()).unwrap();
 }
 
