@@ -27,7 +27,7 @@ Linux 发布包使用 GNU libc，播放需要系统 ALSA 运行库。已安装�
 
 ## 登录与连接
 
-在 NAS 上启用 FN Connect，安装并初始化飞牛音乐，再创建一个音乐独立账号。启动 Termune 后输入 **FN ID、音乐用户名、音乐密码**。FN ID 用来查找 NAS，登录使用飞牛音乐里的账号。
+在 NAS 上安装并初始化飞牛音乐，再创建一个音乐独立账号。启动 Termune 后，在同一个连接输入框填 **FN ID 或 NAS 地址**，然后填音乐用户名和密码。使用 FN ID 时需启用 FN Connect。
 
 登录页按 `Tab` 或 `Shift+Tab` 移动焦点，按空格勾选「下次自动登录」。也可以用鼠标操作或粘贴。密码输入时会隐藏。
 
@@ -45,11 +45,11 @@ Linux 发布包使用 GNU libc，播放需要系统 ALSA 运行库。已安装�
 
 ### 局域网与中继
 
-Termune 每次连接时都会用 FN ID 探测线路，优先选择通过校验的局域网地址。顶栏显示实际连接方式，例如「局域网 · 192.168.1.42」或「FN Connect 中继」。
+填 FN ID 时，Termune 每次连接都会自动探测线路，优先选择通过校验的局域网地址。填 NAS 地址时直接连接。支持域名、IP、端口和代理路径，例如 `https://music.example.com/nas`。省略协议时使用 HTTPS。顶栏显示实际连接方式。手动地址和 FN ID 分别保存本地歌单与浏览位置。
 
 同一局域网内仍显示中继时，先确认 NAS 的局域网地址可达。自签名证书或证书与 IP 不匹配都会导致 HTTPS 直连失败。在可信网络中，可以通过 **设置 → 局域网 HTTP → 允许** 开启 HTTP 直连，重新连接后生效。该选项会保存。**HTTP 会明文传输凭据，仅用于可信局域网。**
 
-也可以用 `termune --allow-lan-http` 临时允许。公网线路使用 HTTPS。Termune 的 FN Connect 支持范围见 [协议说明](FEINIU_API.md)。
+手动填写 `http://192.168.1.42:5666` 时也使用同一个开关。若关闭，登录页会提示，可用 **F2** 直达设置。也可以用 `termune --allow-lan-http` 临时允许。公网 IP 和域名使用 HTTPS。`--login-only` 和 `--diagnose` 同样接受 FN ID 或 NAS 地址。Termune 的 FN Connect 支持范围见 [协议说明](FEINIU_API.md)。
 
 ## 曲库、搜索与歌单
 

@@ -174,9 +174,19 @@ fn login_render_masks_password_and_handles_small_terminals() {
     assert!(!normal.contains("never-show-secret"));
     assert!(normal.contains("••••"));
     let password = std::mem::take(&mut app.fields[2]);
-    let empty_password = render(&mut app, 100, 32);
-    assert_eq!(empty_password.matches('▏').count(), 1);
-    assert!(!empty_password.contains('▎'));
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let field = app
+        .hits
+        .iter()
+        .find_map(|(rect, action)| matches!(action, Action::Field(2)).then_some(*rect))
+        .unwrap();
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        (field.x + 1, field.y + 1).into()
+    );
     app.fields[2] = password;
     for (w, h) in [(36, 16), (45, 20), (1, 1), (20, 8)] {
         let text = render(&mut app, w, h);
@@ -222,6 +232,89 @@ fn login_shortcut_letters_remain_typable_and_small_form_is_usable() {
     key(&mut app, KeyCode::Esc);
     key(&mut app, KeyCode::Char('?'));
     assert_eq!(app.fields[0], "gtmld?");
+}
+
+#[test]
+fn login_arrows_edit_the_middle_of_the_address() {
+    let mut app = app();
+    app.fields[0] = "https://nas.example:500".into();
+    key(&mut app, KeyCode::Left);
+    key(&mut app, KeyCode::Char('1'));
+    assert_eq!(app.fields[0], "https://nas.example:5010");
+}
+
+#[test]
+fn scrolled_login_address_supports_cursor_movement_and_mouse_editing() {
+    let mut app = app();
+    app.fields[0] = format!("https://nas.example/{}/5000", "proxy".repeat(10));
+    let mut terminal = Terminal::new(TestBackend::new(36, 20)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let end = terminal.get_cursor_position().unwrap();
+    key(&mut app, KeyCode::Left);
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let caret = terminal.get_cursor_position().unwrap();
+    assert_eq!(caret.x + 1, end.x);
+    click_input(&mut app, end.x - 3, end.y);
+    key(&mut app, KeyCode::Delete);
+    app.event(Event::Paste("8".into()));
+    assert!(app.fields[0].ends_with("/5800"));
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Backspace);
+    assert!(app.fields[0].starts_with("ttps://"));
+}
+
+#[test]
+fn search_and_playlist_edit_at_the_clicked_grapheme() {
+    let mut app = app();
+    app.connected = true;
+    app.action(Action::Search);
+    app.event(Event::Paste("中文e\u{301}".into()));
+    render(&mut app, 100, 30);
+    let second = app
+        .hits
+        .iter()
+        .find_map(|(rect, action)| {
+            matches!(action, Action::InputCaret(InputField::Search, 3)).then_some(*rect)
+        })
+        .unwrap();
+    assert_eq!(second.width, 2);
+    click_input(&mut app, second.x, second.y);
+    key(&mut app, KeyCode::Delete);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Backspace);
+    assert_eq!(app.search_input, "中");
+
+    key(&mut app, KeyCode::Esc);
+    app.new_playlist(None);
+    app.event(Event::Paste("歌曲单".into()));
+    render(&mut app, 100, 30);
+    let second = app
+        .hits
+        .iter()
+        .find_map(|(rect, action)| {
+            matches!(action, Action::InputCaret(InputField::PlaylistName, 3)).then_some(*rect)
+        })
+        .unwrap();
+    click_input(&mut app, second.x, second.y);
+    key(&mut app, KeyCode::Right);
+    app.event(Event::Paste("清".into()));
+    assert!(
+        matches!(app.playlist_dialog, Some(PlaylistDialog::Name { input, .. }) if input == "歌曲清单")
+    );
+}
+
+fn click_input(app: &mut App, column: u16, row: u16) {
+    app.event(Event::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }));
 }
 
 #[test]
@@ -298,6 +391,107 @@ fn lan_http_setting_is_saved_and_used_for_login_and_restore() {
             ..
         })
     ));
+}
+
+#[test]
+fn manual_http_login_waits_for_settings_and_preserves_the_form() {
+    let mut app = app();
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    app.fields = [
+        "http://192.168.1.42:5666/Music".into(),
+        "listener".into(),
+        "fixture".into(),
+    ];
+    let screen = render(&mut app, 36, 20);
+    assert!(screen.contains("局域网 HTTP 已关闭"));
+    assert!(screen.contains("打开设置"));
+    app.connect();
+    assert!(commands.try_recv().is_err());
+    assert_eq!(app.fields[2], "fixture");
+
+    key(&mut app, KeyCode::F(2));
+    assert_eq!(app.settings, Some(LAN_HTTP_SETTING));
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.fields[2], "fixture");
+    let (replies, rx) = mpsc::channel();
+    app.rx = rx;
+    app.connect();
+    let address = "http://192.168.1.42:5666/Music";
+    let Ok(Command::Login {
+        id,
+        target,
+        allow_http: true,
+        ..
+    }) = commands.try_recv()
+    else {
+        panic!("expected manual login after enabling LAN HTTP");
+    };
+    assert_eq!(target, address);
+    let route = Target::parse(address)
+        .unwrap()
+        .manual_candidate(true)
+        .unwrap()
+        .unwrap();
+    replies
+        .send(Reply::Connected(
+            id,
+            Ok(Connected {
+                server: "test NAS".into(),
+                username: "listener".into(),
+                route,
+                remembered: true,
+                warning: None,
+            }),
+        ))
+        .unwrap();
+    app.replies();
+    assert!(render(&mut app, 100, 24).contains(address));
+
+    let path = app.config.path_override.unwrap();
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config.path_override = Some(path.clone());
+    assert!(config.auto_login);
+    assert_eq!(config.nas_address, address);
+    assert!(config.fn_id.is_empty());
+    let mut restarted = App::with_config(config, String::new(), false);
+    assert_eq!(restarted.fields[0], address);
+    let (tx, commands) = mpsc::channel();
+    restarted.tx = tx;
+    restarted.restore();
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Restore { target, allow_http: true, .. }) if target == address
+    ));
+    restarted.toggle_remember();
+    assert!(matches!(commands.try_recv(), Ok(Command::Logout)));
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::Forget { target, .. }) if target == address
+    ));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn login_hint_matches_the_entered_address_and_protocol() {
+    let mut app = app();
+    app.config.allow_lan_http = true;
+    app.fields[0] = "https://nas.example.com/login".into();
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("HTTPS 直连"));
+    assert!(screen.contains("网页登录地址请去掉 /login"));
+    assert!(!screen.contains("未加密"));
+
+    app.fields[0] = "http://192.168.1.42:5666".into();
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("局域网 HTTP 直连"));
+    assert!(screen.contains("凭据未加密"));
+
+    app.fields[0] = "test-id".into();
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("FN ID · 自动探测连接线路"));
+    assert!(screen.contains("已允许未加密的局域网 HTTP 线路"));
 }
 
 #[test]
@@ -554,11 +748,11 @@ fn restore_has_no_password_and_falls_back_to_login_on_failure() {
     let id = match rx.recv().unwrap() {
         Command::Restore {
             id,
-            fn_id,
+            target,
             username,
             ..
         } => {
-            assert_eq!(fn_id, "test-id");
+            assert_eq!(target, "test-id");
             assert_eq!(username, "tester");
             id
         }

@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     process::ExitCode,
 };
-use termune::{Candidate, Result, Session};
+use termune::{Candidate, Result, Session, connection::Target};
 
 fn prompt(label: &str) -> Result<String> {
     print!("{label}: ");
@@ -217,7 +217,7 @@ fn run() -> Result<()> {
     }
     if args.iter().any(|s| s == "--help" || s == "-h") {
         println!(
-            "Termune · 飞牛音乐终端曲库\n用法: termune [--allow-lan-http] [--diagnose | --login-only]\n      termune update\n      termune --version\n默认启动 TUI。输入 FN ID 和音乐独立账号密码，默认仅 HTTPS。\nupdate: 校验并安装最新正式 Release，保留配置和登录凭据。\n--version: 显示程序版本。\n--allow-lan-http: 允许局域网候选使用 HTTP（密码摘要和 Token 可被窃听）。\n--diagnose: 使用原命令行曲库与媒体验证。\n--login-only: 仅验证登录，跳过曲库及媒体。"
+            "Termune · 飞牛音乐终端曲库\n用法: termune [--allow-lan-http] [--diagnose | --login-only]\n      termune update\n      termune --version\n默认启动 TUI。输入 FN ID 或 NAS 地址，以及音乐独立账号密码。默认仅 HTTPS。\nupdate: 校验并安装最新正式 Release，保留配置和登录凭据。\n--version: 显示程序版本。\n--allow-lan-http: 允许使用局域网 IP 的 HTTP 连接（密码摘要和 Token 可被窃听）。\n--diagnose: 使用命令行验证曲库与媒体。\n--login-only: 仅验证登录，跳过曲库及媒体。"
         );
         return Ok(());
     }
@@ -240,18 +240,31 @@ fn run() -> Result<()> {
     if allow_http {
         println!("警告：已允许局域网 HTTP，密码摘要和 Token 可能被窃听。仅在可信网络测试。");
     }
-    let id = termune::validate_id(&prompt("FN ID（无需填写域名）")?)?;
+    let target = Target::parse(&prompt("FN ID 或 NAS 地址")?)?;
     let client = termune::client(15)?;
-    println!("[1/4] 查询官方 FN Connect 地址发现服务…");
-    let data = termune::discover(&client, &id)?;
-    let candidates = termune::candidates(&data, allow_http);
+    let manual = target
+        .manual_candidate(allow_http)
+        .map_err(|_| "此地址使用 HTTP。请添加 --allow-lan-http 或填写 HTTPS 地址")?;
+    let direct = manual.is_some();
+    let candidates = if let Some(candidate) = manual {
+        println!("[1/4] 使用手动填写的 NAS 地址");
+        vec![candidate]
+    } else {
+        println!("[1/4] 查询官方 FN Connect 地址发现服务…");
+        let data = termune::discover(&client, target.as_str())?;
+        termune::candidates(&data, allow_http)
+    };
     if candidates.is_empty() {
         return Err("官方未返回可用地址；检查 FN ID、设备在线状态和 FN Connect 设置".into());
     }
-    println!(
-        "[2/4] 探测 {} 条候选线路（局域网 → 公网 → DDNS → 中继）…",
-        candidates.len()
-    );
+    if direct {
+        println!("[2/4] 检测 NAS 地址…");
+    } else {
+        println!(
+            "[2/4] 探测 {} 条候选线路（局域网 → 公网 → DDNS → 中继）…",
+            candidates.len()
+        );
+    }
     // All requests here are unauthenticated. No music password/token leaves this
     // process until selection completes. Results retain discovery priority.
     let results = std::thread::scope(|scope| {
@@ -301,13 +314,17 @@ fn run() -> Result<()> {
             ),
         }
     }
-    let (candidate, config) = selected.ok_or("所有线路失败。HTTPS 直连可能因 IP 证书不匹配而失败；程序不会关闭证书验证。也请检查中继安全码设置。")?;
+    let (candidate, config) = selected.ok_or(if direct {
+        "手动连接失败，请检查 NAS 地址、端口、TLS 证书和反向代理配置。"
+    } else {
+        "所有线路失败。HTTPS 直连可能因 IP 证书不匹配而失败；程序不会关闭证书验证。也请检查中继安全码设置。"
+    })?;
     println!(
         "选定线路：{} / {}",
         candidate.label,
         candidate.base.scheme()
     );
-    if relay_guid.is_none() && !candidate.relay {
+    if !direct && relay_guid.is_none() && !candidate.relay {
         println!(
             "提示：中继未提供身份基准，当前仅验证候选地址来自官方发现服务及 TLS（若为 HTTPS）。"
         );

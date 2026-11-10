@@ -1,6 +1,6 @@
 use crate::app::{
-    Action, App, DISCONNECT_SETTING, FAVORITES, LAN_HTTP_SETTING, PLAYLISTS, PlaybackMenu,
-    PlaylistDialog, artists, bar_fraction, clean, name,
+    Action, App, Caret, DISCONNECT_SETTING, FAVORITES, InputField, LAN_HTTP_SETTING, PLAYLISTS,
+    PlaybackMenu, PlaylistDialog, artists, bar_fraction, clean, name,
 };
 use ratatui::{
     Frame,
@@ -12,6 +12,8 @@ use ratatui::{
         ScrollbarOrientation, ScrollbarState, Table, Wrap,
     },
 };
+
+use unicode_segmentation::UnicodeSegmentation;
 
 const THEMES: [&str; 5] = ["Mint", "Amber", "Violet", "Ocean", "Mono"];
 const LAYOUTS: [&str; 4] = ["Airwave", "Operations", "Tracker", "Btop"];
@@ -168,6 +170,7 @@ fn status(a: &App, p: Palette) -> (String, Color) {
         let stage = match a.stage {
             "restore" => a.text("验证已保存的登录状态…", "Checking saved session…"),
             "discovery" => a.text("查询 FN ID…", "Resolving FN ID…"),
+            "manual_probe" => a.text("检测 NAS 地址…", "Checking NAS address…"),
             "probing" => a.text("选择连接线路…", "Selecting connection route…"),
             "initialization" => a.text("检查音乐服务…", "Checking music service…"),
             "login" => a.text("登录并验证身份…", "Signing in…"),
@@ -292,6 +295,10 @@ fn route_label(a: &App, route: &termune::Candidate) -> String {
     if route.relay {
         return a.text("FN Connect 中继", "FN Connect relay").into();
     }
+    if route.label == termune::connection::MANUAL_ROUTE {
+        let kind = a.text("手动地址", "Manual");
+        return format!("{kind} · {}", route.base.as_str().trim_end_matches('/'));
+    }
     let kind = match route.label {
         "局域网 IPv4" | "局域网 IPv6" => a.text("局域网", "LAN"),
         "公网 IPv4" | "公网 IPv6" => a.text("公网直连", "Public IP"),
@@ -399,10 +406,76 @@ fn login_header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
     );
 }
 
+fn input_line(
+    frame: &mut Frame,
+    area: Rect,
+    value: &str,
+    caret: &mut Caret,
+    masked: bool,
+    focused: bool,
+    style: Style,
+) -> Vec<(Rect, usize)> {
+    if area.is_empty() {
+        return Vec::new();
+    }
+    let graphemes: Vec<_> = value
+        .grapheme_indices(true)
+        .map(|(index, grapheme)| {
+            let display = if masked {
+                "•".into()
+            } else {
+                clean(grapheme)
+            };
+            let width = Line::from(display.as_str()).width() as u16;
+            (index, display, width)
+        })
+        .collect();
+    let cursor = graphemes.partition_point(|(index, _, _)| *index < caret.position(value));
+    let mut start = graphemes
+        .partition_point(|(index, _, _)| *index < caret.viewport)
+        .min(cursor);
+    let mut caret_column: usize = graphemes[start..cursor]
+        .iter()
+        .map(|(_, _, width)| usize::from(*width))
+        .sum();
+    // Reserve a cell for the caret when it sits at the end of a full line.
+    while caret_column >= usize::from(area.width) {
+        caret_column -= usize::from(graphemes[start].2);
+        start += 1;
+    }
+    caret.viewport = graphemes
+        .get(start)
+        .map_or(value.len(), |(index, _, _)| *index);
+    let mut hits = Vec::new();
+    let mut visible = String::new();
+    let mut x = area.x;
+    let mut end = value.len();
+    for (index, display, width) in &graphemes[start..] {
+        if *width > area.right() - x {
+            end = *index;
+            break;
+        }
+        if *width > 0 {
+            hits.push((Rect::new(x, area.y, *width, 1), *index));
+            visible.push_str(display);
+            x += width;
+        }
+    }
+    if x < area.right() {
+        hits.push((Rect::new(x, area.y, area.right() - x, 1), end));
+    }
+    frame.render_widget(Paragraph::new(visible).style(style), area);
+    if focused {
+        frame.set_cursor_position((area.x + caret_column as u16, area.y));
+    }
+    hits
+}
+
 fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
-    let spacious = area.height >= 20;
+    use termune::connection::{Target, has_login_suffix};
+    let spacious = area.height >= 21;
     let gap = u16::from(spacious);
-    let form = center(area, 56, if spacious { 20 } else { 15 });
+    let form = center(area, 56, if spacious { 21 } else { 16 });
     let card = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p.edge))
@@ -413,7 +486,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
         Constraint::Length(gap),
         Constraint::Length(2),
         Constraint::Length(gap),
-        Constraint::Length(6 + gap * 2),
+        Constraint::Length(8 + gap * 2),
         Constraint::Length(gap),
         Constraint::Length(2),
         Constraint::Length(1),
@@ -436,12 +509,12 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
         p.dim,
     );
     let labels = [
-        "FN ID",
+        app.text("FN ID 或 NAS 地址", "FN ID or NAS address"),
         app.text("音乐用户名", "Music username"),
         app.text("音乐密码", "Music password"),
     ];
     for (i, label) in labels.into_iter().enumerate() {
-        let row = i as u16 * (2 + gap);
+        let row = i as u16 * (2 + gap) + u16::from(i > 0) * 2;
         let label_area = line(rows[3], row);
         let field = line(rows[3], row + 1);
         let active = app.focus == i && !app.busy;
@@ -451,33 +524,92 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
             label,
             if active { p.accent } else { p.fg },
         );
-        let value = if i == 2 {
-            "•".repeat(app.fields[i].chars().count().min(128))
-        } else {
-            clean(&app.fields[i])
-        };
-        let value = if active { format!("{value}▏") } else { value };
-        let mut visible = String::new();
-        let mut remaining = usize::from(field.width.saturating_sub(2));
-        for c in value.chars().rev() {
-            let width = Line::from(c.to_string()).width();
-            if width > remaining {
-                break;
-            }
-            remaining -= width;
-            visible.insert(0, c);
-        }
         let field_style = Style::default().bg(if active { p.selected } else { p.bg });
-        frame.render_widget(
-            Paragraph::new(format!(" {visible}")).style(field_style),
-            field,
+        frame.render_widget(Block::default().style(field_style), field);
+        let value = &app.fields[i];
+        let hits = input_line(
+            frame,
+            Rect::new(
+                field.x + 1,
+                field.y,
+                field.width.saturating_sub(2),
+                field.height,
+            ),
+            value,
+            &mut app.login_carets[i],
+            i == 2,
+            active && app.settings.is_none() && !app.help,
+            field_style,
         );
         if !app.busy {
             app.hits.push((
                 Rect::new(field.x, label_area.y, field.width, 2),
                 Action::Field(i),
             ));
+            app.hits
+                .extend(hits.into_iter().map(|(rect, offset)| {
+                    (rect, Action::InputCaret(InputField::Login(i), offset))
+                }));
         }
+    }
+    let allow_http = app.allow_lan_http();
+    let target = Target::parse(&app.fields[0]).ok();
+    let manual_http = target.as_ref().is_some_and(Target::requires_lan_http);
+    let http_blocked = !allow_http && manual_http;
+    let target_hint = if http_blocked {
+        app.text(
+            "局域网 HTTP 已关闭，请开启或使用 HTTPS",
+            "LAN HTTP is off. Enable it or use HTTPS.",
+        )
+    } else {
+        match &target {
+            Some(Target::FnId(_)) => app.text(
+                "FN ID · 自动探测连接线路",
+                "FN ID · Automatic route discovery",
+            ),
+            Some(Target::Manual(_)) if manual_http => {
+                app.text("局域网 HTTP 直连", "Direct connection over LAN HTTP")
+            }
+            Some(Target::Manual(_)) => app.text(
+                "HTTPS 直连 · NAS 基础地址",
+                "HTTPS direct · NAS base address",
+            ),
+            None => app.text(
+                "例如 FN ID 或 https://nas.example.com",
+                "Example: FN ID or https://nas.example.com",
+            ),
+        }
+    };
+    text(
+        frame,
+        line(rows[3], 2),
+        target_hint,
+        if http_blocked { Color::Yellow } else { p.dim },
+    );
+    if http_blocked && !app.busy {
+        let label = app.text("[F2 打开设置]", "[F2 Open settings]");
+        let area = line(rows[3], 3);
+        button(
+            frame,
+            app,
+            Rect {
+                width: area.width.min(Line::from(label).width() as u16),
+                ..area
+            },
+            label,
+            Action::LanHttpSettings,
+            p,
+        );
+    } else if matches!(&target, Some(Target::Manual(address)) if has_login_suffix(address)) {
+        text(
+            frame,
+            line(rows[3], 3),
+            app.text(
+                "网页登录地址请去掉 /login",
+                "For a web login page, remove the trailing /login",
+            ),
+            p.dim,
+        );
     }
     let checkbox_label = app.text("下次自动登录", "Sign in automatically");
     let checkbox = format!(
@@ -501,9 +633,17 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
     if !app.busy {
         app.hits.push((checkbox_area, Action::ToggleRemember));
     }
-    let allow_http = app.allow_lan_http();
-    let hint = if allow_http {
-        app.text("HTTP 未加密，凭据可能泄露", "HTTP may expose credentials")
+    let warn_http = allow_http && (manual_http || matches!(target, Some(Target::FnId(_))));
+    let hint = if warn_http && manual_http {
+        app.text(
+            "此地址使用 HTTP，凭据未加密",
+            "This HTTP address sends credentials unencrypted",
+        )
+    } else if warn_http {
+        app.text(
+            "已允许未加密的局域网 HTTP 线路",
+            "Unencrypted LAN HTTP routes are allowed",
+        )
     } else {
         app.text("仅在系统凭据库保存 Token", "Token stored in system vault")
     };
@@ -511,7 +651,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
         frame,
         line(rows[5], 1),
         format!("    {hint}"),
-        if allow_http { Color::Yellow } else { p.dim },
+        if warn_http { Color::Yellow } else { p.dim },
     );
 
     let button = Rect {
@@ -524,7 +664,9 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
             Style::default().fg(p.dim).bg(p.selected),
         )
     } else {
-        let style = if app.focus == 4 {
+        let style = if http_blocked {
+            Style::default().fg(p.dim).bg(p.selected)
+        } else if app.focus == 4 {
             Style::default().fg(p.bg).bg(p.accent)
         } else {
             Style::default().fg(p.accent).bg(p.selected)
@@ -540,7 +682,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
             .style(style),
         button,
     );
-    if !app.busy {
+    if !app.busy && !http_blocked {
         app.hits.push((button, Action::Connect));
         let hint = Rect {
             x: button.right() + 2,
@@ -1654,28 +1796,36 @@ fn help_modal(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         text(f, cols[1], description, p.fg);
     }
 }
-fn search(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
+fn search(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
     let modal = center(area, 64, 7);
     frame.render_widget(Clear, modal);
     let title = app.text("搜索歌曲", "Search songs");
     let block = pane(title.into(), p, true);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!(" / {}▏", clean(&app.search_input)),
-            Style::default().fg(p.accent),
-        )),
-        Line::from(""),
-        Line::from(app.text(
+    let row = line(inner, 1);
+    text(frame, row, " / ", p.accent);
+    let hits = input_line(
+        frame,
+        Rect::new(row.x + 3, row.y, row.width.saturating_sub(3), row.height),
+        &app.search_input,
+        &mut app.search_caret,
+        false,
+        true,
+        Style::default().fg(p.accent),
+    );
+    app.hits.extend(
+        hits.into_iter()
+            .map(|(rect, offset)| (rect, Action::InputCaret(InputField::Search, offset))),
+    );
+    text(
+        frame,
+        line(inner, 3),
+        app.text(
             " Enter 搜索 · Esc 取消 · Ctrl+U 清空",
             " Enter Search · Esc Cancel · Ctrl+U Clear",
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(p.fg)),
-        inner,
+        ),
+        p.fg,
     );
 }
 
@@ -1713,9 +1863,19 @@ fn playlist_dialog(f: &mut Frame, a: &mut App, area: Rect, p: Palette) {
     .split(inner);
     let mut pick_rows = None;
     match &mut a.playlist_dialog {
-        Some(PlaylistDialog::Name { input, .. }) => {
-            let value = format!("{}▏", clean(input));
-            text(f, parts[1], value, p.accent);
+        Some(PlaylistDialog::Name { input, caret, .. }) => {
+            let hits = input_line(
+                f,
+                line(parts[1], 0),
+                input,
+                caret,
+                false,
+                true,
+                Style::default().fg(p.accent),
+            );
+            a.hits.extend(hits.into_iter().map(|(rect, offset)| {
+                (rect, Action::InputCaret(InputField::PlaylistName, offset))
+            }));
         }
         Some(PlaylistDialog::Pick { track, cursor }) => {
             text(f, parts[0], name(track, "title"), p.dim);

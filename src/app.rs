@@ -18,7 +18,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use termune::{Result, Session, library::Page};
+use termune::{Result, Session, connection::Target, library::Page};
 
 pub const KINDS: [&str; 6] = ["album", "artist", "genre", "track", "favorite", "playlist"];
 pub const TRACKS: usize = 3;
@@ -26,6 +26,9 @@ pub const FAVORITES: usize = 4;
 pub const PLAYLISTS: usize = 5;
 pub const LAN_HTTP_SETTING: usize = 5;
 pub const DISCONNECT_SETTING: usize = LAN_HTTP_SETTING + 1;
+
+mod input;
+pub use input::{Caret, InputField};
 
 mod location;
 pub use location::BrowseLocation;
@@ -74,7 +77,7 @@ struct Load {
 enum Command {
     Login {
         id: u64,
-        fn_id: String,
+        target: String,
         username: String,
         password: String,
         allow_http: bool,
@@ -82,12 +85,12 @@ enum Command {
     },
     Restore {
         id: u64,
-        fn_id: String,
+        target: String,
         username: String,
         allow_http: bool,
     },
     Forget {
-        fn_id: String,
+        target: String,
         username: String,
     },
     Media {
@@ -148,6 +151,7 @@ struct PlaybackContext {
 #[derive(Clone, Copy)]
 pub enum Action {
     Field(usize),
+    InputCaret(InputField, usize),
     Connect,
     ToggleRemember,
     Section(usize),
@@ -157,6 +161,7 @@ pub enum Action {
     Next,
     Select,
     Settings,
+    LanHttpSettings,
     Help,
     Setting(usize),
     ChangeSetting(usize, i8),
@@ -248,6 +253,7 @@ impl TimedMessage {
 pub struct App {
     pub config: Config,
     pub fields: [String; 3],
+    pub login_carets: [Caret; 3],
     pub focus: usize,
     pub remember: bool,
     notice: Option<TimedMessage>,
@@ -270,6 +276,7 @@ pub struct App {
     pub help: bool,
     pub playback_menu: Option<(PlaybackMenu, usize)>,
     pub search_input: String,
+    pub search_caret: Caret,
     pub busy: bool,
     pub stage: &'static str,
     status: Option<TimedMessage>,
@@ -317,7 +324,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
         match command {
             Command::Login {
                 id,
-                fn_id,
+                target,
                 username,
                 password,
                 allow_http,
@@ -329,7 +336,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                 session = None;
                 let result = authenticate(
                     &client,
-                    &fn_id,
+                    &target,
                     &username,
                     allow_http,
                     Authentication::Password(password, remember),
@@ -346,7 +353,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
             }
             Command::Restore {
                 id,
-                fn_id,
+                target,
                 username,
                 allow_http,
             } => {
@@ -356,7 +363,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                 session = None;
                 let result = authenticate(
                     &client,
-                    &fn_id,
+                    &target,
                     &username,
                     allow_http,
                     Authentication::Restore,
@@ -371,9 +378,9 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                 });
                 let _ = tx.send(Reply::Connected(id, result));
             }
-            Command::Forget { fn_id, username } => {
+            Command::Forget { target, username } => {
                 use termune::credentials::TokenStore;
-                let result = termune::credentials::KeyringStore::new(&fn_id, &username)
+                let result = termune::credentials::KeyringStore::new(&target, &username)
                     .and_then(|store| store.clear());
                 let _ = tx.send(Reply::Forgotten(result));
             }
@@ -474,7 +481,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
 
 fn authenticate(
     client: &reqwest::blocking::Client,
-    fn_id: &str,
+    target: &str,
     username: &str,
     allow_http: bool,
     method: Authentication,
@@ -483,18 +490,20 @@ fn authenticate(
 ) -> Result<(Session, Connected)> {
     use termune::credentials::{KeyringStore, TokenStore};
     let (latest, id) = attempt;
+    let target = Target::parse(target)?;
+    let manual = matches!(target, Target::Manual(_));
+    let identity = target.as_str();
     let saved = if matches!(method, Authentication::Restore) {
         progress("restore");
         Some(
-            KeyringStore::new(fn_id, username)?
+            KeyringStore::new(identity, username)?
                 .load()?
                 .ok_or("没有已保存的登录状态，请输入密码登录")?,
         )
     } else {
         None
     };
-    let connection =
-        termune::connection::discover_connection(client, fn_id, allow_http, &mut progress)?;
+    let connection = target.connect(client, allow_http, &mut progress)?;
     if latest.load(Ordering::Relaxed) != id {
         return Err("连接已取消".into());
     }
@@ -512,8 +521,10 @@ fn authenticate(
             if latest.load(Ordering::Relaxed) != id {
                 return Err("连接已取消".into());
             }
-            let warning = if remember {
-                KeyringStore::new(fn_id, username)
+            let warning = if remember && manual && server_guid.is_none() {
+                Some("NAS 未提供设备身份，本次仍可使用，无法保存自动登录".into())
+            } else if remember {
+                KeyringStore::new(identity, username)
                     .and_then(|store| {
                         termune::credentials::persist(
                             &store,
@@ -532,7 +543,10 @@ fn authenticate(
         Authentication::Restore => {
             progress("restore");
             let saved = saved.ok_or("没有保存的登录状态")?;
-            let store = KeyringStore::new(fn_id, username)?;
+            if manual && saved.server_guid.is_none() {
+                return Err("保存的登录状态缺少 NAS 身份，请重新输入密码".into());
+            }
+            let store = KeyringStore::new(identity, username)?;
             let authenticated = termune::credentials::restore_saved(
                 &store,
                 &connection.candidate,
@@ -601,7 +615,7 @@ impl App {
             .tx
             .send(Command::Restore {
                 id,
-                fn_id: self.config.fn_id.clone(),
+                target: self.config.connection_target().to_owned(),
                 username: self.config.username.clone(),
                 allow_http: self.allow_lan_http(),
             })
@@ -620,9 +634,9 @@ impl App {
             }
             self.config.auto_login = false;
             self.save();
-            if !self.config.fn_id.is_empty() && !self.config.username.is_empty() {
+            if !self.config.connection_target().is_empty() && !self.config.username.is_empty() {
                 let _ = self.tx.send(Command::Forget {
-                    fn_id: self.config.fn_id.clone(),
+                    target: self.config.connection_target().to_owned(),
                     username: self.config.username.clone(),
                 });
             }
@@ -634,7 +648,9 @@ impl App {
             Err(e) => (Config::default(), e),
         };
         let mut app = Self::with_config(config, status, allow_http);
-        if app.config.auto_login && !app.config.fn_id.is_empty() && !app.config.username.is_empty()
+        if app.config.auto_login
+            && !app.config.connection_target().is_empty()
+            && !app.config.username.is_empty()
         {
             app.restore();
         }
@@ -661,9 +677,14 @@ impl App {
             }
         }
         Self {
-            fields: [config.fn_id.clone(), config.username.clone(), String::new()],
+            fields: [
+                config.connection_target().to_owned(),
+                config.username.clone(),
+                String::new(),
+            ],
+            login_carets: [Caret::default(); 3],
             remember: config.auto_login,
-            focus: if !config.fn_id.is_empty() && !config.username.is_empty() {
+            focus: if !config.connection_target().is_empty() && !config.username.is_empty() {
                 2
             } else {
                 0
@@ -689,6 +710,7 @@ impl App {
             help: false,
             playback_menu: None,
             search_input: String::new(),
+            search_caret: Caret::default(),
             busy: false,
             stage: "",
             error: !status.is_empty(),
@@ -818,13 +840,17 @@ impl App {
         if self.busy {
             return;
         }
-        let fn_id = match termune::validate_id(&self.fields[0]) {
-            Ok(id) => id,
+        let target = match Target::parse(&self.fields[0]) {
+            Ok(target) => target,
             Err(e) => {
                 self.fail(e);
                 return;
             }
         };
+        if let Err(error) = target.manual_candidate(self.allow_lan_http()) {
+            self.fail(error);
+            return;
+        }
         let username = self.fields[1].trim().to_owned();
         if username.is_empty() || self.fields[2].is_empty() {
             self.fail(
@@ -839,13 +865,21 @@ impl App {
         let id = self.next_id();
         self.busy = true;
         self.clear_status();
-        self.stage = "discovery";
+        self.stage = if matches!(target, Target::Manual(_)) {
+            "manual_probe"
+        } else {
+            "discovery"
+        };
+        let target = target.as_str().to_owned();
+        self.fields[0] = target.clone();
+        self.login_carets[0] = Caret::default();
         let password = std::mem::take(&mut self.fields[2]);
+        self.login_carets[2] = Caret::default();
         if self
             .tx
             .send(Command::Login {
                 id,
-                fn_id,
+                target,
                 username,
                 password,
                 allow_http: self.allow_lan_http(),
@@ -893,6 +927,7 @@ impl App {
             false,
         );
         self.fields[2].clear();
+        self.login_carets[2] = Caret::default();
         self.focus = 2;
     }
     fn replies(&mut self) {
@@ -913,7 +948,7 @@ impl App {
                 Err(error) => {
                     if termune::is_auth_error(&error) {
                         let _ = self.tx.send(Command::Forget {
-                            fn_id: self.config.fn_id.clone(),
+                            target: self.config.connection_target().to_owned(),
                             username: self.config.username.clone(),
                         });
                         self.logout();
@@ -925,31 +960,41 @@ impl App {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
                 Reply::Progress(id, stage) if id == self.generation => self.stage = stage,
-                Reply::Connected(id, result) if id == self.generation => match result {
-                    Ok(connected) => {
-                        self.connected = true;
-                        self.restoring = false;
-                        self.server = connected.server;
-                        self.username = connected.username;
-                        self.route = Some(connected.route);
-                        self.remember = connected.remembered;
-                        self.config.auto_login = connected.remembered;
-                        self.notice = connected
-                            .warning
-                            .map(|warning| TimedMessage::new(warning, 8));
-                        self.busy = false;
-                        self.config.fn_id = self.fields[0].trim().to_ascii_lowercase();
-                        self.config.username = self.fields[1].trim().to_owned();
-                        if let Err(error) = self.config.save() {
-                            self.show_notice(error);
+                Reply::Connected(id, result) if id == self.generation => {
+                    match result {
+                        Ok(connected) => {
+                            self.connected = true;
+                            self.restoring = false;
+                            self.server = connected.server;
+                            self.username = connected.username;
+                            self.route = Some(connected.route);
+                            self.remember = connected.remembered;
+                            self.config.auto_login = connected.remembered;
+                            self.notice = connected
+                                .warning
+                                .map(|warning| TimedMessage::new(warning, 8));
+                            self.busy = false;
+                            if self.route.as_ref().is_some_and(|route| {
+                                route.label == termune::connection::MANUAL_ROUTE
+                            }) {
+                                self.config.fn_id.clear();
+                                self.config.nas_address = self.fields[0].clone();
+                            } else {
+                                self.config.fn_id = self.fields[0].trim().to_ascii_lowercase();
+                                self.config.nas_address.clear();
+                            }
+                            self.config.username = self.fields[1].trim().to_owned();
+                            if let Err(error) = self.config.save() {
+                                self.show_notice(error);
+                            }
+                            if let Err(error) = self.read_playlists() {
+                                self.show_notice(error);
+                            }
+                            self.restore_location();
                         }
-                        if let Err(error) = self.read_playlists() {
-                            self.show_notice(error);
-                        }
-                        self.restore_location();
+                        Err(e) => self.fail(e),
                     }
-                    Err(e) => self.fail(e),
-                },
+                }
                 Reply::Page(load, result) if load.id == self.generation => {
                     self.busy = false;
                     match result {
@@ -975,7 +1020,7 @@ impl App {
                         Err(e) => {
                             if termune::is_auth_error(&e) {
                                 let _ = self.tx.send(Command::Forget {
-                                    fn_id: self.config.fn_id.clone(),
+                                    target: self.config.connection_target().to_owned(),
                                     username: self.config.username.clone(),
                                 });
                                 self.logout();
@@ -1622,6 +1667,20 @@ impl App {
             }
             Action::FollowLyrics => self.follow_lyrics(),
             Action::Field(i) => self.focus = i,
+            Action::InputCaret(field, offset) => match field {
+                InputField::Login(i) => {
+                    self.focus = i;
+                    self.login_carets[i].place(&self.fields[i], offset);
+                }
+                InputField::Search => self.search_caret.place(&self.search_input, offset),
+                InputField::PlaylistName => {
+                    if let Some(PlaylistDialog::Name { input, caret, .. }) =
+                        &mut self.playlist_dialog
+                    {
+                        caret.place(input, offset);
+                    }
+                }
+            },
             Action::Connect => self.connect(),
             Action::ToggleRemember => self.toggle_remember(),
             Action::Section(i) => self.switch(i),
@@ -1663,9 +1722,13 @@ impl App {
                     .saturating_add_signed(delta)
                     .min(self.media.lyrics.len().saturating_mul(8))
             }
-            Action::Settings => {
+            Action::Settings | Action::LanHttpSettings => {
                 self.seek_drag = None;
-                self.settings = Some(0);
+                self.settings = Some(if matches!(action, Action::LanHttpSettings) {
+                    LAN_HTTP_SETTING
+                } else {
+                    0
+                });
                 self.help = false;
                 self.close_search();
             }
@@ -1701,6 +1764,7 @@ impl App {
             Action::Search => {
                 self.editing = true;
                 self.search_input.clear();
+                self.search_caret = Caret::default();
             }
             Action::Refresh => {
                 if self.section == PLAYLISTS
@@ -1718,6 +1782,7 @@ impl App {
     fn close_search(&mut self) {
         self.editing = false;
         self.search_input.clear();
+        self.search_caret = Caret::default();
     }
     fn back(&mut self) {
         if self.seek_drag.take().is_some() || self.cancel_volume_drag() {
@@ -1877,6 +1942,13 @@ impl App {
                 return;
             }
             match key.code {
+                KeyCode::F(2)
+                    if !self.allow_lan_http()
+                        && Target::parse(&self.fields[0])
+                            .is_ok_and(|target| target.requires_lan_http()) =>
+                {
+                    self.action(Action::LanHttpSettings);
+                }
                 KeyCode::Tab => self.focus = (self.focus + 1) % 5,
                 KeyCode::BackTab => self.focus = (self.focus + 4) % 5,
                 KeyCode::Enter => {
@@ -1889,22 +1961,8 @@ impl App {
                     }
                 }
                 KeyCode::Char(' ') if self.focus == 3 => self.toggle_remember(),
-                KeyCode::Backspace if self.focus < 3 => {
-                    self.fields[self.focus].pop();
-                }
-                KeyCode::Char('u')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && self.focus < 3 =>
-                {
-                    self.fields[self.focus].clear()
-                }
-                KeyCode::Char(c)
-                    if self.focus < 3
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && !c.is_control() =>
-                {
-                    self.fields[self.focus].push(c)
+                _ if self.focus < 3 => {
+                    self.login_carets[self.focus].key(&mut self.fields[self.focus], key)
                 }
                 _ => {}
             }
@@ -1913,12 +1971,6 @@ impl App {
         if self.editing {
             match key.code {
                 KeyCode::Esc => self.close_search(),
-                KeyCode::Backspace => {
-                    self.search_input.pop();
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.search_input.clear()
-                }
                 KeyCode::Enter => {
                     let query = self.search_input.trim().to_owned();
                     self.close_search();
@@ -1932,15 +1984,7 @@ impl App {
                     self.search_view = View::default();
                     self.load(1);
                 }
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && !c.is_control() =>
-                {
-                    self.search_input.push(c)
-                }
-                _ => {}
+                _ => self.search_caret.key(&mut self.search_input, key),
             }
             return;
         }
@@ -2023,11 +2067,13 @@ impl App {
                     .take(4096)
                     .collect();
                 if !self.connected && !self.busy && self.focus < 3 {
-                    self.fields[self.focus].push_str(&value);
-                } else if let Some(PlaylistDialog::Name { input, .. }) = &mut self.playlist_dialog {
-                    input.push_str(&value);
+                    self.login_carets[self.focus].insert(&mut self.fields[self.focus], &value);
+                } else if let Some(PlaylistDialog::Name { input, caret, .. }) =
+                    &mut self.playlist_dialog
+                {
+                    caret.insert(input, &value);
                 } else if self.editing {
-                    self.search_input.push_str(&value);
+                    self.search_caret.insert(&mut self.search_input, &value);
                 }
             }
             Event::Mouse(mouse)
@@ -2061,95 +2107,104 @@ impl App {
                     }
                 }
             }
-            Event::Mouse(mouse) if !self.editing => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let action = self
-                        .hits
-                        .iter()
-                        .rev()
-                        .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
-                        .map(|(_, a)| *a);
-                    if self.playback_menu.is_some()
-                        || matches!(action, Some(Action::TogglePlaybackMenu(_)))
-                    {
-                        self.last_click = None;
-                        match action {
-                            Some(
-                                action @ (Action::TogglePlaybackMenu(_)
-                                | Action::PlaybackMenuSurface
-                                | Action::SelectPlaybackOption(_)),
-                            ) => {
+            Event::Mouse(mouse)
+                if !self.editing || mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let action = self
+                            .hits
+                            .iter()
+                            .rev()
+                            .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
+                            .map(|(_, a)| *a);
+                        if self.editing
+                            && !matches!(action, Some(Action::InputCaret(InputField::Search, _)))
+                        {
+                            return;
+                        }
+                        if self.playback_menu.is_some()
+                            || matches!(action, Some(Action::TogglePlaybackMenu(_)))
+                        {
+                            self.last_click = None;
+                            match action {
+                                Some(
+                                    action @ (Action::TogglePlaybackMenu(_)
+                                    | Action::PlaybackMenuSurface
+                                    | Action::SelectPlaybackOption(_)),
+                                ) => {
+                                    self.action(action);
+                                }
+                                _ => self.playback_menu = None,
+                            }
+                            return;
+                        }
+                        let now = Instant::now();
+                        let double = self.last_click.take().is_some_and(|(x, y, time)| {
+                            x == mouse.column
+                                && y == mouse.row
+                                && now.duration_since(time) <= Duration::from_millis(400)
+                        });
+                        if !double {
+                            self.last_click = Some((mouse.column, mouse.row, now));
+                        }
+                        if let Some(action) = action {
+                            if !matches!(action, Action::LyricLine(_)) || double {
                                 self.action(action);
                             }
-                            _ => self.playback_menu = None,
-                        }
-                        return;
-                    }
-                    let now = Instant::now();
-                    let double = self.last_click.take().is_some_and(|(x, y, time)| {
-                        x == mouse.column
-                            && y == mouse.row
-                            && now.duration_since(time) <= Duration::from_millis(400)
-                    });
-                    if !double {
-                        self.last_click = Some((mouse.column, mouse.row, now));
-                    }
-                    if let Some(action) = action {
-                        if !matches!(action, Action::LyricLine(_)) || double {
-                            self.action(action);
-                        }
-                        if double && matches!(action, Action::Row(_)) {
-                            self.action(Action::Select);
+                            if double && matches!(action, Action::Row(_)) {
+                                self.action(Action::Select);
+                            }
                         }
                     }
-                }
-                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-                    if let Some((menu, offset)) = &mut self.playback_menu =>
-                {
-                    let delta = if mouse.kind == MouseEventKind::ScrollDown {
-                        1
-                    } else {
-                        -1
-                    };
-                    *offset = offset
-                        .saturating_add_signed(delta)
-                        .min(menu.option_count() - 1);
-                }
-                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-                    if self.playlist_dialog.is_some() =>
-                {
-                    self.move_playlist_picker(if mouse.kind == MouseEventKind::ScrollDown {
-                        1
-                    } else {
-                        -1
-                    });
-                }
-                MouseEventKind::ScrollDown
-                    if self.connected && self.settings.is_none() && !self.help =>
-                {
-                    if self.hits.iter().any(|(r, a)| {
-                        matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
-                            && r.contains((mouse.column, mouse.row).into())
-                    }) {
-                        self.action(Action::LyricsScroll(3));
-                    } else {
-                        self.move_selection(3);
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                        if let Some((menu, offset)) = &mut self.playback_menu =>
+                    {
+                        let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                            1
+                        } else {
+                            -1
+                        };
+                        *offset = offset
+                            .saturating_add_signed(delta)
+                            .min(menu.option_count() - 1);
                     }
-                }
-                MouseEventKind::ScrollUp
-                    if self.connected && self.settings.is_none() && !self.help =>
-                {
-                    if self.hits.iter().any(|(r, a)| {
-                        matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
-                            && r.contains((mouse.column, mouse.row).into())
-                    }) {
-                        self.action(Action::LyricsScroll(-3));
-                    } else {
-                        self.move_selection(-3);
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                        if self.playlist_dialog.is_some() =>
+                    {
+                        self.move_playlist_picker(if mouse.kind == MouseEventKind::ScrollDown {
+                            1
+                        } else {
+                            -1
+                        });
                     }
+                    MouseEventKind::ScrollDown
+                        if self.connected && self.settings.is_none() && !self.help =>
+                    {
+                        if self.hits.iter().any(|(r, a)| {
+                            matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
+                                && r.contains((mouse.column, mouse.row).into())
+                        }) {
+                            self.action(Action::LyricsScroll(3));
+                        } else {
+                            self.move_selection(3);
+                        }
+                    }
+                    MouseEventKind::ScrollUp
+                        if self.connected && self.settings.is_none() && !self.help =>
+                    {
+                        if self.hits.iter().any(|(r, a)| {
+                            matches!(a, Action::LyricsScroll(_) | Action::LyricLine(_))
+                                && r.contains((mouse.column, mouse.row).into())
+                        }) {
+                            self.action(Action::LyricsScroll(-3));
+                        } else {
+                            self.move_selection(-3);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }

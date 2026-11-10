@@ -34,18 +34,23 @@ pub trait TokenStore {
     fn clear(&self) -> Result<()>;
 }
 
-pub fn account_key(fn_id: &str, username: &str) -> String {
-    crate::hash_password(
-        &serde_json::json!([fn_id.trim().to_ascii_lowercase(), username.trim()]).to_string(),
-    )
+pub fn account_key(target: &str, username: &str) -> String {
+    let target = target.trim();
+    let identity = if target.contains("://") {
+        // Manual targets are already canonical, and proxy paths are case sensitive.
+        serde_json::json!(["manual", target, username.trim()])
+    } else {
+        serde_json::json!([target.to_ascii_lowercase(), username.trim()])
+    };
+    crate::hash_password(&identity.to_string())
 }
 
 pub struct KeyringStore {
     entry: keyring::Entry,
 }
 impl KeyringStore {
-    pub fn new(fn_id: &str, username: &str) -> Result<Self> {
-        let entry = keyring::Entry::new("termune.music-session", &account_key(fn_id, username))
+    pub fn new(target: &str, username: &str) -> Result<Self> {
+        let entry = keyring::Entry::new("termune.music-session", &account_key(target, username))
             .map_err(|_| "无法打开系统凭据存储".to_owned())?;
         Ok(Self { entry })
     }

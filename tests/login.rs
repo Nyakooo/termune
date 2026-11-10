@@ -65,6 +65,56 @@ fn ids_and_cookie_injection() {
 }
 
 #[test]
+fn manual_target_parses_addresses_and_keeps_http_limited_to_lan_ips() {
+    use termune::connection::Target;
+
+    for (input, normalized) in [
+        (" My-Nas ", "my-nas"),
+        (
+            "NAS.example.test:443/Music/",
+            "https://nas.example.test/Music",
+        ),
+        ("192.168.1.42:5667", "https://192.168.1.42:5667/"),
+        ("fd00::42", "https://[fd00::42]/"),
+        ("[::1]", "https://[::1]/"),
+        ("http://[fd00::42]:5666", "http://[fd00::42]:5666/"),
+    ] {
+        assert_eq!(Target::parse(input).unwrap().as_str(), normalized);
+    }
+    for invalid in [
+        "http://nas.example.test",
+        "http://8.8.8.8",
+        "http://[2001:db8::1]",
+        "https://user:secret@nas.example.test",
+        "https://@nas.example.test",
+        "https://nas.example.test/?token=secret",
+        "https://nas.example.test/#fragment",
+        "https:///nas.example.test",
+        "ftp://nas.example.test",
+    ] {
+        assert!(Target::parse(invalid).is_err(), "{invalid}");
+    }
+    let https = Target::parse("https://nas.example.test").unwrap();
+    assert!(https.manual_candidate(false).unwrap().is_some());
+}
+
+#[test]
+fn manual_account_keys_preserve_proxy_path_case_and_old_fn_id_keys() {
+    use termune::credentials::account_key;
+
+    let legacy = hash_password(r#"["my-nas","tester"]"#);
+    assert_eq!(account_key(" My-Nas ", "tester"), legacy);
+    assert_ne!(
+        account_key("https://nas.example.test/Proxy", "tester"),
+        legacy
+    );
+    assert_ne!(
+        account_key("https://nas.example.test/Proxy", "tester"),
+        account_key("https://nas.example.test/proxy", "tester"),
+    );
+}
+
+#[test]
 fn discovery_candidates_prioritize_and_validate() {
     let data = json!({"ipv4":["192.168.1.2", "bad/path"], "publicIpv6":["2001:db8::1"],
         "fn":["nas.fnos.net:443", "evil@host", "host/path"], "port":{"httpsPort":1234,"httpPort":4321}});
@@ -256,4 +306,34 @@ fn mock_probe_rejects_html_and_keeps_proxy_prefix() {
             .contains("JSON")
     );
     assert!(handle.join().unwrap()[0].starts_with("GET /proxy/music/api/v1/sys/config "));
+}
+
+#[test]
+fn manual_probe_explains_404_without_rewriting_the_entered_path() {
+    for (path, label, expected) in [
+        (
+            "/nas/login",
+            termune::connection::MANUAL_ROUTE,
+            "去掉地址末尾的 /login",
+        ),
+        (
+            "/nas",
+            termune::connection::MANUAL_ROUTE,
+            "检查 NAS 地址或反向代理路径",
+        ),
+        ("/nas", "FN Connect 中继", "HTTP 404"),
+    ] {
+        let (mut candidate, handle) = server(vec![("404 Not Found", "SECRET".into())]);
+        candidate.base.set_path(path);
+        candidate.label = label;
+        let error = candidate.probe(&client(3).unwrap()).err().unwrap();
+        assert!(error.contains(expected));
+        assert!(!error.contains("SECRET"));
+        if label != termune::connection::MANUAL_ROUTE {
+            assert_eq!(error, expected);
+        }
+        assert!(
+            handle.join().unwrap()[0].starts_with(&format!("GET {path}/music/api/v1/sys/config "))
+        );
+    }
 }

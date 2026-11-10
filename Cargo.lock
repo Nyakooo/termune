@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "termune"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "cpal",
  "crossterm",
@@ -2721,6 +2721,7 @@ dependencies = [
  "symphonia-adapter-libopus",
  "tempfile",
  "toml",
+ "unicode-segmentation",
  "url",
 ]
 

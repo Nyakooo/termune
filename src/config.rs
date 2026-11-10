@@ -7,6 +7,8 @@ use termune::Result;
 #[serde(default)]
 pub struct Config {
     pub fn_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nas_address: String,
     pub username: String,
     pub english: bool,
     pub theme: usize,
@@ -33,6 +35,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             fn_id: String::new(),
+            nas_address: String::new(),
             username: String::new(),
             english: false,
             theme: 0,
@@ -55,6 +58,14 @@ impl Default for Config {
 }
 
 impl Config {
+    pub(crate) fn connection_target(&self) -> &str {
+        if self.nas_address.is_empty() {
+            &self.fn_id
+        } else {
+            &self.nas_address
+        }
+    }
+
     pub(crate) fn path() -> Result<std::path::PathBuf> {
         Ok(directories::ProjectDirs::from("", "", "termune")
             .ok_or("无法确定配置目录")?

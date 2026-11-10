@@ -6,7 +6,7 @@
 
 **Termune is a cross-platform terminal music player for Feiniu NAS.** Connect to your NAS from the terminal to browse your music library, search tracks, manage playlists, and play music — without opening a browser or a desktop music app.
 
-Lightweight and installation-free, Termune runs on Windows, macOS, and Linux. It discovers your NAS with FN ID, probes available connection routes, and prioritizes LAN connectivity.
+Lightweight and installation-free, Termune runs on Windows, macOS, and Linux. Connect by FN ID with automatic route discovery or enter your NAS address directly.
 
 ## Real-world screenshots
 
@@ -40,7 +40,7 @@ Runs on **Windows, macOS, and Linux**, and is built with Rust. Termune is an ind
 
 | Feature | Description |
 | --- | --- |
-| NAS connection | Discover your device with FN ID and automatically probe available routes |
+| NAS connection | Discover by FN ID or connect directly by domain or IP |
 | Library browsing | Browse albums, artists, genres, all songs, favorites, and playlists |
 | Search | Quickly find tracks in your music library |
 | Playlist management | Create, rename, and delete playlists; add or remove tracks |
@@ -107,7 +107,7 @@ Extract the archive and run `termune.exe` on Windows or `./termune` on Linux / m
 
 ### Prepare your NAS
 
-1. Make sure your Feiniu NAS is online and FN Connect is enabled.
+1. Make sure your Feiniu NAS is online. Enable FN Connect if you plan to use an FN ID.
 2. Install and initialize Feiniu Music on the NAS.
 3. Create a **Feiniu Music independent account** for Termune.
 
@@ -121,7 +121,7 @@ termune
 
 Enter the following when prompted:
 
-- **FN ID**: Used to discover your NAS.
+- **FN ID or NAS address**: Enter an FN ID for automatic discovery, or a domain, IP address, or full URL to connect directly.
 - **Music username**: The independent account created in Feiniu Music.
 - **Music password**: The password for that account.
 
@@ -131,7 +131,9 @@ You can enable **Remember me** on the login screen. After a successful login, Te
 
 ### Connection routes
 
-Termune retrieves candidate addresses for your FN ID and probes available routes automatically. The current connection type and related address are shown in the top bar after connecting. Actual LAN, public, and relay availability depends on your NAS and network environment.
+With an FN ID, Termune probes available routes and prioritizes LAN connectivity. To connect without FN Connect or through a reverse proxy or tunnel, enter the reachable address, such as `https://music.example.com/nas`. Addresses without a scheme default to HTTPS.
+
+On a trusted LAN, enable **Settings → LAN HTTP** and enter an address such as `http://192.168.1.42:5666`. Public IP addresses and domain names require HTTPS. The top bar shows the active connection.
 
 ## Keyboard shortcuts
 

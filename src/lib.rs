@@ -158,6 +158,13 @@ pub struct Candidate {
     pub label: &'static str,
 }
 
+fn is_lan_ip(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
+}
+
 fn strings<'a>(data: &'a Value, key: &str) -> Vec<&'a str> {
     data[key]
         .as_array()
@@ -193,12 +200,9 @@ pub fn candidates(data: &Value, allow_http: bool) -> Vec<Candidate> {
                 _ => addr.to_string(),
             };
             for (scheme, port) in [("https", https), ("http", http)] {
-                let private = match addr {
-                    std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
-                    std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
-                };
                 // HTTP requires an explicit opt-in and an actual local IP.
-                if scheme == "http" && (!allow_http || !private || !matches!(key, "ipv4" | "ipv6"))
+                if scheme == "http"
+                    && (!allow_http || !is_lan_ip(addr) || !matches!(key, "ipv4" | "ipv6"))
                 {
                     continue;
                 }
@@ -305,11 +309,26 @@ impl Candidate {
                 // Reject cross-origin redirects; the caller independently probes
                 // other endpoints from the official discovery response.
                 if target.origin() != candidate.base.origin() {
-                    return Err("跨源跳转：继续探测官方返回的其他候选".into());
+                    return Err(if self.label == connection::MANUAL_ROUTE {
+                        "地址发生跨源跳转，请填写最终的 HTTPS 地址"
+                    } else {
+                        "跨源跳转：继续探测官方返回的其他候选"
+                    }
+                    .into());
                 }
                 target.set_path(&path);
                 candidate.base = target;
                 continue;
+            }
+            if candidate.label == connection::MANUAL_ROUTE
+                && response.status() == reqwest::StatusCode::NOT_FOUND
+            {
+                return Err(if connection::has_login_suffix(&candidate.base) {
+                    "HTTP 404 · 请去掉地址末尾的 /login"
+                } else {
+                    "HTTP 404 · 请检查 NAS 地址或反向代理路径"
+                }
+                .into());
             }
             return Ok((candidate, business_data(response_json(response)?)?));
         }

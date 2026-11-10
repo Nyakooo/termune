@@ -171,15 +171,27 @@ fn media(status: &'static str, headers: &str, body: &[u8]) -> Reply {
 }
 
 fn logged_in(replies: Vec<Reply>) -> (Session, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap())
-        .parse()
-        .unwrap();
     let mut all = vec![
         json_reply(json!({"userToken":"test-token"})),
         json_reply(json!({"name":"tester","guid":"user-guid"})),
     ];
     all.extend(replies);
+    let (base, handle) = mock_server(all);
+    let session = Candidate {
+        base,
+        relay: true,
+        label: "Mock",
+    }
+    .login(&client(3).unwrap(), "tester", "secret", "device")
+    .unwrap();
+    (session, handle)
+}
+
+fn mock_server(all: Vec<Reply>) -> (url::Url, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         for reply in all {
@@ -237,14 +249,95 @@ fn logged_in(replies: Vec<Reply>) -> (Session, thread::JoinHandle<Vec<String>>) 
         }
         requests
     });
-    let session = Candidate {
-        base,
-        relay: true,
-        label: "Mock",
+    (base, handle)
+}
+
+#[test]
+fn manual_target_connects_through_a_path_prefix_to_login_library_and_media() {
+    use termune::connection::Target;
+
+    let (proxy, handle) = mock_server(vec![
+        json_reply(json!({"serverGUID":"nas-guid"})),
+        json_reply(json!({"initialized":true})),
+        json_reply(json!({"userToken":"test-token"})),
+        json_reply(json!({"name":"tester","guid":"user-guid"})),
+        json_reply(json!({"list":[{"guid":"track"}],"total":1})),
+        media(
+            "200 OK",
+            "Content-Type: image/png\r\n",
+            b"\x89PNG\r\n\x1a\nmock",
+        ),
+        media(
+            "206 Partial Content",
+            "Content-Type: audio/flac\r\nContent-Range: bytes 0-7/8\r\n",
+            b"fLaCmock",
+        ),
+        media(
+            "206 Partial Content",
+            "Content-Type: audio/flac\r\nContent-Range: bytes 4-7/8\r\n",
+            b"mock",
+        ),
+    ]);
+    // Route the fixture's private IP to a loopback listener on any test host.
+    let client = reqwest::blocking::Client::builder()
+        .proxy(reqwest::Proxy::http(proxy.as_str()).unwrap())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let target = Target::parse("http://192.168.42.1:5666/MusicProxy/").unwrap();
+    assert!(
+        target
+            .connect(&client, false, |_| panic!("unexpected probe"))
+            .is_err()
+    );
+    let mut stages = Vec::new();
+    let connection = target
+        .connect(&client, true, |stage| stages.push(stage))
+        .unwrap();
+    assert_eq!(stages, ["manual_probe", "initialization"]);
+    assert_eq!(connection.config["serverGUID"], "nas-guid");
+    let session = connection
+        .candidate
+        .login(&client, "tester", "secret", "device")
+        .unwrap();
+    assert_eq!(
+        session.page(&client, "track", 1, None).unwrap().items.len(),
+        1
+    );
+    let cache = tempfile::tempdir().unwrap();
+    assert_eq!(
+        session.cover(&client, "cover", cache.path()).unwrap().bytes,
+        12
+    );
+    for (range, bytes) in [("bytes=0-", "fLaCmock"), ("bytes=4-", "mock")] {
+        let response = session
+            .audio_response(&client, "track", Some(range))
+            .unwrap();
+        assert_eq!(response.text().unwrap(), bytes);
     }
-    .login(&client(3).unwrap(), "tester", "secret", "device")
-    .unwrap();
-    (session, handle)
+    let requests = handle.join().unwrap();
+    for request in &requests {
+        assert!(
+            request
+                .lines()
+                .next()
+                .unwrap()
+                .contains("http://192.168.42.1:5666/MusicProxy/music/api/v1/")
+        );
+        assert!(!request.contains("mode=relay"));
+    }
+    assert!(
+        requests[..3]
+            .iter()
+            .all(|request| !request.contains("music-token"))
+    );
+    assert!(
+        requests[3..]
+            .iter()
+            .all(|request| request.contains("music-token=test-token"))
+    );
+    assert!(requests[7].contains("range: bytes=4-"));
 }
 
 #[test]

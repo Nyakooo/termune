@@ -62,7 +62,10 @@ impl App {
                 })
             }),
         };
-        let key = termune::credentials::account_key(&self.config.fn_id, &self.config.username);
+        let key = termune::credentials::account_key(
+            self.config.connection_target(),
+            &self.config.username,
+        );
         if self.config.browse_locations.get(&key) != Some(&location) {
             self.config.browse_locations.insert(key, location);
             if let Err(error) = self.config.save() {
@@ -77,7 +80,10 @@ impl App {
             self.load(1);
             return;
         }
-        let key = termune::credentials::account_key(&self.config.fn_id, &self.config.username);
+        let key = termune::credentials::account_key(
+            self.config.connection_target(),
+            &self.config.username,
+        );
         let Some(location) = self.config.browse_locations.get(&key).cloned() else {
             self.load(1);
             return;

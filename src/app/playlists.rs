@@ -1,5 +1,5 @@
-use super::{App, Config, PLAYLISTS, View, clean, name};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use super::{App, Caret, Config, PLAYLISTS, View, clean, name};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::{ListState, TableState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,6 +21,7 @@ pub enum PlaylistDialog {
         id: Option<String>,
         track: Option<Value>,
         input: String,
+        caret: Caret,
     },
     Pick {
         track: Value,
@@ -62,7 +63,10 @@ impl App {
             .path_override
             .clone()
             .map_or_else(Config::path, Ok)?;
-        let key = termune::credentials::account_key(&self.config.fn_id, &self.config.username);
+        let key = termune::credentials::account_key(
+            self.config.connection_target(),
+            &self.config.username,
+        );
         Ok(config
             .with_extension("playlists")
             .join(format!("{key}.json")))
@@ -158,6 +162,7 @@ impl App {
             id: None,
             track,
             input: String::new(),
+            caret: Caret::default(),
         });
     }
 
@@ -170,6 +175,7 @@ impl App {
                 id: Some(id),
                 track: None,
                 input,
+                caret: Caret::default(),
             });
         }
     }
@@ -241,7 +247,9 @@ impl App {
             return;
         };
         let (result, zh, en) = match dialog {
-            PlaylistDialog::Name { id, track, input } => {
+            PlaylistDialog::Name {
+                id, track, input, ..
+            } => {
                 let title = clean(input).trim().to_owned();
                 if title.is_empty() {
                     self.fail(self.text("请输入歌单名称", "Enter a playlist name").into());
@@ -360,23 +368,7 @@ impl App {
             return;
         }
         match &mut self.playlist_dialog {
-            Some(PlaylistDialog::Name { input, .. }) => match key.code {
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.clear()
-                }
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && !c.is_control() =>
-                {
-                    input.push(c)
-                }
-                _ => {}
-            },
+            Some(PlaylistDialog::Name { input, caret, .. }) => caret.key(input, key),
             Some(PlaylistDialog::Pick { .. }) => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.move_playlist_picker(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.move_playlist_picker(1),
