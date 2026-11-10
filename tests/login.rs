@@ -99,6 +99,45 @@ fn manual_target_parses_addresses_and_keeps_http_limited_to_lan_ips() {
 }
 
 #[test]
+fn manual_lan_port_fallback_respects_explicit_ports_and_paths() {
+    use termune::connection::Target;
+
+    for (input, ports) in [
+        ("http://192.168.1.42", &[80, 5666, 8000][..]),
+        ("http://192.168.1.42/", &[80, 5666, 8000][..]),
+        ("https://[fd00::42]", &[443, 5667, 8001][..]),
+        ("http://192.168.1.42:80", &[80][..]),
+        ("https://[fd00::42]:443", &[443][..]),
+        ("http://192.168.1.42:1234", &[1234][..]),
+        ("http://192.168.1.42/proxy", &[80][..]),
+        ("https://nas.example.test", &[443][..]),
+        ("https://8.8.8.8", &[443][..]),
+        ("my-nas", &[][..]),
+    ] {
+        let target = Target::parse(input).unwrap();
+        // The TUI submits the normalized input and parses it again on restore.
+        let target = Target::parse(target.input_address()).unwrap();
+        let actual: Vec<_> = target
+            .manual_candidates(true)
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.base.port_or_known_default().unwrap())
+            .collect();
+        assert_eq!(actual, ports, "{input}");
+    }
+    assert!(
+        Target::parse("http://192.168.1.42")
+            .unwrap()
+            .manual_candidates(false)
+            .is_err()
+    );
+    assert_eq!(
+        termune::credentials::account_key("http://192.168.1.42:80", "tester"),
+        termune::credentials::account_key("http://192.168.1.42/", "tester")
+    );
+}
+
+#[test]
 fn manual_account_keys_preserve_proxy_path_case_and_old_fn_id_keys() {
     use termune::credentials::account_key;
 

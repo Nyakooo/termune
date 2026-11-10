@@ -51,7 +51,9 @@ Linux 发布包使用 GNU libc，播放需要系统 ALSA 运行库。已安装�
 
 同一局域网内仍显示中继时，先确认 NAS 的局域网地址可达。自签名证书或证书与 IP 不匹配都会导致 HTTPS 直连失败。在可信网络中，可以通过 **设置 → 局域网 HTTP → 允许** 开启 HTTP 直连，重新连接后生效。该选项会保存。**HTTP 会明文传输凭据，仅用于可信局域网。**
 
-手动填写 `http://192.168.1.42:5666` 时也使用同一个开关。若关闭，登录页会提示，可用 **F2** 直达设置。也可以用 `termune --allow-lan-http` 临时允许。公网 IP 和域名使用 HTTPS。`--login-only` 和 `--diagnose` 同样接受 FN ID 或 NAS 地址。Termune 的 FN Connect 支持范围见 [协议说明](FEINIU_API.md)。
+使用默认端口时，手动填写局域网 IP 可省略端口，例如 `http://192.168.1.42`。如果 NAS 使用自定义端口，请填写完整地址。手动使用 HTTP 时，按登录页提示开启「局域网 HTTP」，也可以用 `termune --allow-lan-http` 临时允许。公网 IP 和域名使用 HTTPS。`--login-only` 和 `--diagnose` 同样接受 FN ID 或 NAS 地址。Termune 的 FN Connect 支持范围见 [协议说明](FEINIU_API.md)。
+
+如果用 FN ID 登录时提示直连线路要求访问码并请你手动填写地址，把 FN ID 换成 NAS 的局域网地址，再按提示验证访问码。
 
 ## 曲库、搜索与歌单
 

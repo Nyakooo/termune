@@ -11,7 +11,10 @@ use std::{
     io::{self, Write},
     process::ExitCode,
 };
-use termune::{Candidate, Probe, Result, Session, connection::Target};
+use termune::{
+    Candidate, Probe, Result, Session,
+    connection::{AccessChallenge, Target},
+};
 
 fn prompt(label: &str) -> Result<String> {
     print!("{label}: ");
@@ -243,12 +246,12 @@ fn run() -> Result<()> {
     let target = Target::parse(&prompt("FN ID 或 NAS 地址")?)?;
     let client = termune::client(15)?;
     let manual = target
-        .manual_candidate(allow_http)
+        .manual_candidates(allow_http)
         .map_err(|_| "此地址使用 HTTP。请添加 --allow-lan-http 或填写 HTTPS 地址")?;
-    let direct = manual.is_some();
-    let candidates = if let Some(candidate) = manual {
+    let direct = !manual.is_empty();
+    let candidates = if direct {
         println!("[1/4] 使用手动填写的 NAS 地址");
-        vec![candidate]
+        manual
     } else {
         println!("[1/4] 查询官方 FN Connect 地址发现服务…");
         let data = termune::discover(&client, target.as_str())?;
@@ -289,10 +292,22 @@ fn run() -> Result<()> {
             _ => None,
         })
         .and_then(|config| config["serverGUID"].as_str())
+        .filter(|guid| !guid.is_empty())
         .map(str::to_owned);
     let mut selected: Option<(Candidate, serde_json::Value)> = None;
     let mut challenge: Option<Candidate> = None;
-    for (candidate, result) in candidates.iter().zip(results) {
+    let mut direct_challenge = false;
+    for (candidate, result) in candidates.iter().zip(&results) {
+        let scheme = candidate.base.scheme();
+        let protocol = if direct && candidates.len() > 1 {
+            candidate
+                .base
+                .port_or_known_default()
+                .map(|port| format!("{scheme}:{port}"))
+        } else {
+            None
+        };
+        let protocol = protocol.as_deref().unwrap_or(scheme);
         match result {
             Ok(Probe::Ready(c, config)) => {
                 if let Some(expected) = &relay_guid
@@ -305,30 +320,70 @@ fn run() -> Result<()> {
                     );
                     continue;
                 }
-                println!("  {} / {}: PASS", c.label, c.base.scheme());
+                println!("  {} / {protocol}: PASS", c.label);
                 if selected.is_none() {
-                    selected = Some((c, config));
+                    selected = Some((c.clone(), config.clone()));
+                }
+                if direct {
+                    break;
                 }
             }
             Ok(Probe::AccessCode(c)) => {
-                println!("  {} / {}: 需要飞牛访问码", c.label, c.base.scheme());
-                challenge.get_or_insert(c);
+                println!("  {} / {protocol}: 需要飞牛访问码", c.label);
+                if direct || c.relay {
+                    challenge.get_or_insert_with(|| c.clone());
+                } else {
+                    direct_challenge = true;
+                }
+                if direct {
+                    break;
+                }
             }
-            Err(e) => println!(
-                "  {} / {}: FAIL — {e}",
-                candidate.label,
-                candidate.base.scheme()
-            ),
+            Err(e) => println!("  {} / {protocol}: FAIL — {e}", candidate.label),
         }
     }
-    let (candidate, config) = if let Some(selected) = selected {
+    let needs_relay_verification = !direct && relay_guid.is_none() && challenge.is_some();
+    let (candidate, config) = if let Some(selected) = selected.filter(|_| !needs_relay_verification)
+    {
         selected
     } else if let Some(challenge) = challenge {
+        let challenge = AccessChallenge::from_probes(challenge, &results);
+        let (route, prefer_lan) = if let Some(lan) = challenge.lan_challenge() {
+            let answer = prompt(&format!(
+                "局域网地址 {}，输入 y 直连或 n 使用中继",
+                lan.base
+            ))?;
+            if answer.eq_ignore_ascii_case("y") {
+                (lan, true)
+            } else if answer.eq_ignore_ascii_case("n") {
+                (&challenge.candidate, false)
+            } else {
+                return Err("已取消访问码验证".into());
+            }
+        } else {
+            (&challenge.candidate, true)
+        };
         let code = rpassword::prompt_password("飞牛访问码（隐藏输入）: ")
             .map_err(|_| "无法安全读取访问码，请在交互终端中运行")?;
-        let verified = challenge.verify_access_code(&client, &code, allow_http)?;
+        let verified = route.verify_access_code(&client, &code, allow_http);
         drop(code);
-        verified.probe(&client)?
+        let verified = match verified {
+            Err(error) if direct && error == termune::ACCESS_CODE_PATH_NOT_FOUND => {
+                println!("{error}");
+                let answer = prompt("改用同域名根路径 /access_code_verify 验证？输入 y 确认")?;
+                if !answer.eq_ignore_ascii_case("y") {
+                    return Err("已取消访问码验证".into());
+                }
+                let code = rpassword::prompt_password("飞牛访问码（隐藏输入）: ")
+                    .map_err(|_| "无法安全读取访问码，请在交互终端中运行")?;
+                route.verify_access_code_at(&client, &code, allow_http, true)?
+            }
+            other => other?,
+        };
+        let connection = challenge.resume(&client, &verified, prefer_lan, |_| {})?;
+        (connection.candidate, connection.config)
+    } else if direct_challenge {
+        return Err(termune::connection::ACCESS_CODE_USE_DIRECT_ADDRESS.into());
     } else if direct {
         return Err("手动连接失败，请检查 NAS 地址、端口、TLS 证书和反向代理配置。".into());
     } else {
@@ -341,7 +396,7 @@ fn run() -> Result<()> {
         candidate.label,
         candidate.base.scheme()
     );
-    if !direct && relay_guid.is_none() && !candidate.relay {
+    if !direct && relay_guid.is_none() && !needs_relay_verification && !candidate.relay {
         println!(
             "提示：中继未提供身份基准，当前仅验证候选地址来自官方发现服务及 TLS（若为 HTTPS）。"
         );

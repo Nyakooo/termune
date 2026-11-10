@@ -37,7 +37,10 @@ pub trait TokenStore {
 pub fn account_key(target: &str, username: &str) -> String {
     let target = target.trim();
     let identity = if target.contains("://") {
-        // Manual targets are already canonical, and proxy paths are case sensitive.
+        // The connection input may retain an explicit :80/:443. Keep the
+        // canonical address as the identity for existing local data.
+        let parsed = crate::connection::Target::parse(target).ok();
+        let target = parsed.as_ref().map_or(target, |address| address.as_str());
         serde_json::json!(["manual", target, username.trim()])
     } else {
         serde_json::json!([target.to_ascii_lowercase(), username.trim()])

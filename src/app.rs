@@ -19,8 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 use termune::{
-    Candidate, Result, Session,
-    connection::{Connection, ConnectionAttempt, Target, complete_probe},
+    Result, Session,
+    connection::{AccessChallenge, Connection, ConnectionAttempt, Target, check_initialization},
     credentials::{KeyringStore, SavedSession, TokenStore},
     library::Page,
 };
@@ -97,6 +97,7 @@ enum Command {
     AccessCode {
         id: u64,
         code: String,
+        destination: AccessDestination,
     },
     Forget {
         target: String,
@@ -127,7 +128,12 @@ enum Command {
 enum Reply {
     Progress(u64, &'static str),
     Connected(u64, Result<Connected>),
-    AccessCode(u64, Option<String>),
+    AccessCode {
+        id: u64,
+        error: Option<String>,
+        origin_root_available: bool,
+        lan_address: Option<String>,
+    },
     Forgotten(Result<()>),
     Media(u64, String, crate::media::Download),
     Page(Load, Result<Page>),
@@ -158,15 +164,23 @@ struct LoginRequest {
 
 enum LoginOutcome {
     Connected(Session, Connected),
-    AccessCode(LoginRequest, Candidate),
+    AccessCode(LoginRequest, AccessChallenge),
 }
 
 #[derive(Default)]
 pub struct AccessPrompt {
     pub input: String,
     pub caret: Caret,
+    pub origin_root_available: bool,
+    pub lan_address: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum AccessDestination {
+    Preferred,
+    OriginRoot,
+    Relay,
+}
 #[derive(Clone)]
 struct PlaybackContext {
     section: usize,
@@ -183,6 +197,8 @@ pub enum Action {
     Connect,
     ToggleRemember,
     SubmitAccessCode,
+    SubmitRootAccessCode,
+    SubmitRelayAccessCode,
     SwitchAddress,
     Section(usize),
     Back,
@@ -351,7 +367,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
         }
     };
     let mut session: Option<Session> = None;
-    let mut pending_access: Option<(u64, LoginRequest, Candidate)> = None;
+    let mut pending_access: Option<(u64, LoginRequest, AccessChallenge)> = None;
     for command in rx {
         match command {
             command @ (Command::Login { id, .. }
@@ -415,16 +431,31 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                                 )
                             })
                     }
-                    Command::AccessCode { code, .. } => {
-                        let Some((challenge_id, request, candidate)) = pending_access.take() else {
+                    Command::AccessCode {
+                        code, destination, ..
+                    } => {
+                        let Some((challenge_id, request, challenge)) = pending_access.take() else {
                             continue;
                         };
                         if challenge_id != id {
                             continue;
                         }
+                        let candidate = match destination {
+                            AccessDestination::Preferred => {
+                                challenge.lan_challenge().unwrap_or(&challenge.candidate)
+                            }
+                            AccessDestination::OriginRoot | AccessDestination::Relay => {
+                                &challenge.candidate
+                            }
+                        };
+                        let origin_root = matches!(destination, AccessDestination::OriginRoot);
                         progress("access_code");
-                        let verified =
-                            candidate.verify_access_code(&client, &code, request.allow_http);
+                        let verified = candidate.verify_access_code_at(
+                            &client,
+                            &code,
+                            request.allow_http,
+                            origin_root,
+                        );
                         drop(code);
                         if latest.load(Ordering::Relaxed) != id {
                             continue;
@@ -432,24 +463,36 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                         let verified = match verified {
                             Ok(candidate) => candidate,
                             Err(error) => {
-                                pending_access = Some((id, request, candidate));
-                                let _ = tx.send(Reply::AccessCode(id, Some(error)));
+                                let origin_root_available = origin_root
+                                    || (candidate.label == termune::connection::MANUAL_ROUTE
+                                        && error == termune::ACCESS_CODE_PATH_NOT_FOUND);
+                                let lan_address = challenge
+                                    .lan_challenge()
+                                    .map(|route| route.base.to_string());
+                                pending_access = Some((id, request, challenge));
+                                let _ = tx.send(Reply::AccessCode {
+                                    id,
+                                    error: Some(error),
+                                    origin_root_available,
+                                    lan_address,
+                                });
                                 continue;
                             }
                         };
-                        verified
-                            .probe_route(&client)
-                            .and_then(|probe| complete_probe(&client, probe, progress))
-                            .and_then(|attempt_result| match attempt_result {
-                                ConnectionAttempt::Ready(connection) => {
-                                    finish_login(&client, request, connection, attempt, progress)
-                                        .map(|(session, connected)| {
-                                            LoginOutcome::Connected(session, connected)
-                                        })
-                                }
-                                ConnectionAttempt::AccessCode(_) => {
-                                    Err("飞牛未接受访问码会话，请检查 NAS 地址或反向代理".into())
-                                }
+                        challenge
+                            .resume(
+                                &client,
+                                &verified,
+                                !matches!(destination, AccessDestination::Relay),
+                                progress,
+                            )
+                            .and_then(|connection| {
+                                check_initialization(&client, &connection.candidate, progress)?;
+                                finish_login(&client, request, connection, attempt, progress).map(
+                                    |(session, connected)| {
+                                        LoginOutcome::Connected(session, connected)
+                                    },
+                                )
                             })
                     }
                     _ => unreachable!(),
@@ -460,8 +503,16 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                         let _ = tx.send(Reply::Connected(id, Ok(connected)));
                     }
                     Ok(LoginOutcome::AccessCode(request, candidate)) => {
+                        let lan_address = candidate
+                            .lan_challenge()
+                            .map(|route| route.base.to_string());
                         pending_access = Some((id, request, candidate));
-                        let _ = tx.send(Reply::AccessCode(id, None));
+                        let _ = tx.send(Reply::AccessCode {
+                            id,
+                            error: None,
+                            origin_root_available: false,
+                            lan_address,
+                        });
                     }
                     Err(error) => {
                         let _ = tx.send(Reply::Connected(id, Err(error)));
@@ -604,7 +655,7 @@ fn finish_login(
     } = request;
     let (latest, id) = attempt;
     let target = Target::parse(&identity)?;
-    let manual = matches!(target, Target::Manual(_));
+    let manual = matches!(target, Target::Manual { .. });
     let identity = target.as_str();
     if latest.load(Ordering::Relaxed) != id {
         return Err("连接已取消".into());
@@ -967,12 +1018,12 @@ impl App {
         let id = self.next_id();
         self.busy = true;
         self.clear_status();
-        self.stage = if matches!(target, Target::Manual(_)) {
+        self.stage = if matches!(target, Target::Manual { .. }) {
             "manual_probe"
         } else {
             "discovery"
         };
-        let target = target.as_str().to_owned();
+        let target = target.input_address().to_owned();
         self.fields[0] = target.clone();
         self.login_carets[0] = Caret::default();
         let password = std::mem::take(&mut self.fields[2]);
@@ -992,11 +1043,16 @@ impl App {
             self.fail("后台任务已停止".into());
         }
     }
-    fn submit_access_code(&mut self) {
+    fn submit_access_code(&mut self, destination: AccessDestination) {
         let Some(prompt) = self.access_prompt.as_mut().filter(|_| !self.busy) else {
             return;
         };
-        if prompt.input.trim().is_empty() {
+        let available = match destination {
+            AccessDestination::Preferred => true,
+            AccessDestination::OriginRoot => prompt.origin_root_available,
+            AccessDestination::Relay => prompt.lan_address.is_some(),
+        };
+        if prompt.input.trim().is_empty() || !available {
             return;
         }
         let code = std::mem::take(&mut prompt.input);
@@ -1009,6 +1065,7 @@ impl App {
             .send(Command::AccessCode {
                 id: self.generation,
                 code,
+                destination,
             })
             .is_err()
         {
@@ -1097,9 +1154,18 @@ impl App {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
                 Reply::Progress(id, stage) if id == self.generation => self.stage = stage,
-                Reply::AccessCode(id, error) if id == self.generation => {
+                Reply::AccessCode {
+                    id,
+                    error,
+                    origin_root_available,
+                    lan_address,
+                } if id == self.generation => {
                     self.busy = false;
-                    self.access_prompt = Some(AccessPrompt::default());
+                    self.access_prompt = Some(AccessPrompt {
+                        origin_root_available,
+                        lan_address,
+                        ..AccessPrompt::default()
+                    });
                     if let Some(error) = error {
                         self.show_status(error, true);
                     }
@@ -1833,7 +1899,9 @@ impl App {
             },
             Action::Connect => self.connect(),
             Action::ToggleRemember => self.toggle_remember(),
-            Action::SubmitAccessCode => self.submit_access_code(),
+            Action::SubmitAccessCode => self.submit_access_code(AccessDestination::Preferred),
+            Action::SubmitRootAccessCode => self.submit_access_code(AccessDestination::OriginRoot),
+            Action::SubmitRelayAccessCode => self.submit_access_code(AccessDestination::Relay),
             Action::SwitchAddress => self.switch_address(),
             Action::Section(i) => self.switch(i),
             Action::Back => self.back(),
@@ -1967,7 +2035,15 @@ impl App {
         if let Some(prompt) = &mut self.access_prompt {
             match key.code {
                 KeyCode::Esc => self.switch_address(),
-                KeyCode::Enter if key.kind == KeyEventKind::Press => self.submit_access_code(),
+                KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                    self.submit_access_code(AccessDestination::Preferred)
+                }
+                KeyCode::F(3) if key.kind == KeyEventKind::Press => {
+                    self.submit_access_code(AccessDestination::OriginRoot)
+                }
+                KeyCode::F(4) if key.kind == KeyEventKind::Press => {
+                    self.submit_access_code(AccessDestination::Relay)
+                }
                 _ if !self.busy => prompt.caret.key(&mut prompt.input, key),
                 _ => {}
             }

@@ -510,7 +510,14 @@ fn access_code_prompt_masks_input_retries_and_ignores_cancelled_attempts() {
     let Ok(Command::Login { id, .. }) = commands.try_recv() else {
         panic!("expected music login");
     };
-    replies.send(Reply::AccessCode(id, None)).unwrap();
+    replies
+        .send(Reply::AccessCode {
+            id,
+            error: None,
+            origin_root_available: false,
+            lan_address: None,
+        })
+        .unwrap();
     app.replies();
     app.event(Event::Paste("access-fixture".into()));
     let screen = render(&mut app, 80, 24);
@@ -520,11 +527,16 @@ fn access_code_prompt_masks_input_retries_and_ignores_cancelled_attempts() {
     key(&mut app, KeyCode::Enter);
     assert!(matches!(
         commands.try_recv(),
-        Ok(Command::AccessCode { id: attempt, code }) if attempt == id && code == "access-fixture"
+        Ok(Command::AccessCode { id: attempt, code, destination: AccessDestination::Preferred }) if attempt == id && code == "access-fixture"
     ));
     assert!(app.access_prompt.as_ref().unwrap().input.is_empty());
     replies
-        .send(Reply::AccessCode(id, Some("访问码验证未通过".into())))
+        .send(Reply::AccessCode {
+            id,
+            error: Some("访问码验证未通过".into()),
+            origin_root_available: false,
+            lan_address: None,
+        })
         .unwrap();
     app.replies();
     assert!(render(&mut app, 80, 24).contains("访问码验证未通过"));
@@ -532,10 +544,94 @@ fn access_code_prompt_masks_input_retries_and_ignores_cancelled_attempts() {
 
     key(&mut app, KeyCode::Esc);
     assert!(matches!(commands.try_recv(), Ok(Command::Logout)));
-    replies.send(Reply::AccessCode(id, None)).unwrap();
+    replies
+        .send(Reply::AccessCode {
+            id,
+            error: None,
+            origin_root_available: false,
+            lan_address: None,
+        })
+        .unwrap();
     app.replies();
     assert!(app.access_prompt.is_none());
     assert_eq!(app.fields[0], "https://nas.example/");
+}
+
+#[test]
+fn root_access_code_submission_requires_a_separate_user_action() {
+    let mut app = app();
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    let (replies, rx) = mpsc::channel();
+    app.rx = rx;
+    let id = app.generation;
+    replies
+        .send(Reply::AccessCode {
+            id,
+            error: None,
+            origin_root_available: false,
+            lan_address: None,
+        })
+        .unwrap();
+    app.replies();
+    app.event(Event::Paste("fixture".into()));
+    key(&mut app, KeyCode::F(3));
+    assert!(commands.try_recv().is_err());
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::AccessCode {
+            destination: AccessDestination::Preferred,
+            ..
+        })
+    ));
+
+    replies
+        .send(Reply::AccessCode {
+            id,
+            error: Some(termune::ACCESS_CODE_PATH_NOT_FOUND.into()),
+            origin_root_available: true,
+            lan_address: None,
+        })
+        .unwrap();
+    app.replies();
+    assert!(render(&mut app, 36, 20).contains("[F3 根路径验证]"));
+    assert!(commands.try_recv().is_err());
+    app.event(Event::Paste("fixture".into()));
+    key(&mut app, KeyCode::F(3));
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::AccessCode { destination: AccessDestination::OriginRoot, code, .. }) if code == "fixture"
+    ));
+}
+
+#[test]
+fn access_code_prompt_shows_the_lan_address_and_routes_the_users_choice() {
+    for (key_code, use_relay) in [(KeyCode::Enter, false), (KeyCode::F(4), true)] {
+        let mut app = app();
+        let (tx, commands) = mpsc::channel();
+        app.tx = tx;
+        let address = "http://192.168.42.1:5666/";
+        app.access_prompt = Some(AccessPrompt {
+            lan_address: Some(address.into()),
+            ..AccessPrompt::default()
+        });
+        let screen = render(&mut app, 36, 20);
+        assert!(screen.contains(address));
+        assert!(screen.contains("[Enter 验证局域网]"));
+        assert!(screen.contains("[F4 使用中继]"));
+        assert!(commands.try_recv().is_err());
+        app.event(Event::Paste("fixture".into()));
+        key(&mut app, key_code);
+        let Command::AccessCode {
+            destination, code, ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("expected access code submission");
+        };
+        assert_eq!(code, "fixture");
+        assert_eq!(matches!(destination, AccessDestination::Relay), use_relay);
+    }
 }
 
 #[test]
@@ -1312,7 +1408,14 @@ fn switch_address_leaves_auto_login_and_access_code_verification() {
             panic!("expected automatic login");
         };
         if verifying {
-            replies.send(Reply::AccessCode(id, None)).unwrap();
+            replies
+                .send(Reply::AccessCode {
+                    id,
+                    error: None,
+                    origin_root_available: false,
+                    lan_address: None,
+                })
+                .unwrap();
             app.replies();
             app.event(Event::Paste("access-fixture".into()));
             key(&mut app, KeyCode::Enter);
@@ -1335,7 +1438,14 @@ fn switch_address_leaves_auto_login_and_access_code_verification() {
         assert!(app.config.auto_login);
         assert_eq!(app.config.nas_address, address);
         assert_eq!(app.fields[0], address);
-        replies.send(Reply::AccessCode(id, None)).unwrap();
+        replies
+            .send(Reply::AccessCode {
+                id,
+                error: None,
+                origin_root_available: false,
+                lan_address: None,
+            })
+            .unwrap();
         app.replies();
         assert!(app.access_prompt.is_none());
         let screen = render(&mut app, 36, 20);

@@ -422,34 +422,56 @@ fn login_header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
 }
 
 fn access_code_dialog(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
-    let verify = app.text("[Enter 验证]", "[Enter Verify]");
+    let prompt = app.access_prompt.as_ref().unwrap();
+    let origin_root_available = prompt.origin_root_available;
+    let has_lan = prompt.lan_address.is_some();
+    let address_rows = u16::from(has_lan);
+    let verify = if has_lan {
+        app.text("[Enter 验证局域网]", "[Enter Verify LAN]")
+    } else {
+        app.text("[Enter 验证]", "[Enter Verify]")
+    };
     let switch = app.text("[Esc 切换地址]", "[Esc Switch address]");
     let verify_width = Line::from(verify).width() as u16;
     let switch_width = Line::from(switch).width() as u16;
     let switch_offset = verify_width + 3;
     let stacked = switch_offset + switch_width > area.width.min(54).saturating_sub(4);
-    let modal = center(area, 54, if stacked { 8 } else { 7 });
+    let modal = center(
+        area,
+        54,
+        7 + u16::from(stacked) + 2 * u16::from(origin_root_available) + 2 * address_rows,
+    );
     frame.render_widget(Clear, modal);
     let block = pane(app.text("飞牛访问码", "Feiniu access code").into(), p, true);
     let inner = inset(block.inner(modal), 1, 0);
     frame.render_widget(block, modal);
-    text(
-        frame,
-        line(inner, 1),
-        app.text("验证访问码后继续登录", "Verify the access code to continue"),
-        p.dim,
-    );
+    if let Some(address) = &prompt.lan_address {
+        let label = app.text("局域网", "LAN");
+        frame.render_widget(
+            Paragraph::new(format!("{label} · {}", clean(address)))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(p.dim)),
+            Rect::new(inner.x, inner.y + 1, inner.width, 2),
+        );
+    } else {
+        text(
+            frame,
+            line(inner, 1),
+            app.text("验证访问码后继续登录", "Verify the access code to continue"),
+            p.dim,
+        );
+    }
     let prompt = app.access_prompt.as_mut().unwrap();
     let hits = input_line(
         frame,
-        line(inner, 2),
+        line(inner, 2 + address_rows),
         &prompt.input,
         &mut prompt.caret,
         true,
         !app.busy,
         Style::default().fg(p.fg).bg(p.selected),
     );
-    let actions = line(inner, 4);
+    let actions = line(inner, 4 + address_rows);
     let verify_area = Rect {
         width: verify_width,
         ..actions
@@ -470,6 +492,39 @@ fn access_code_dialog(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) 
     };
     let switch_area = Rect::new(x, y, switch_width, 1);
     button(frame, app, switch_area, switch, Action::SwitchAddress, p);
+    let extra_row = 5 + u16::from(stacked) + address_rows;
+    if origin_root_available {
+        let root_row = extra_row;
+        text(
+            frame,
+            line(inner, root_row),
+            app.text(
+                "同域名 /access_code_verify",
+                "Same host /access_code_verify",
+            ),
+            p.dim,
+        );
+        if !app.busy {
+            let label = app.text("[F3 根路径验证]", "[F3 Verify at root]");
+            buttons(
+                frame,
+                app,
+                line(inner, root_row + 1),
+                vec![(label.into(), Action::SubmitRootAccessCode)],
+                p,
+            );
+        }
+    }
+    if has_lan && !app.busy {
+        let label = app.text("[F4 使用中继]", "[F4 Use relay]");
+        buttons(
+            frame,
+            app,
+            line(inner, extra_row),
+            vec![(label.into(), Action::SubmitRelayAccessCode)],
+            p,
+        );
+    }
 }
 
 fn input_line(
@@ -633,10 +688,10 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
                 "FN ID · 自动探测连接线路",
                 "FN ID · Automatic route discovery",
             ),
-            Some(Target::Manual(_)) if manual_http => {
+            Some(Target::Manual { .. }) if manual_http => {
                 app.text("局域网 HTTP 直连", "Direct connection over LAN HTTP")
             }
-            Some(Target::Manual(_)) => app.text(
+            Some(Target::Manual { .. }) => app.text(
                 "HTTPS 直连 · NAS 基础地址",
                 "HTTPS direct · NAS base address",
             ),
@@ -666,7 +721,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
             Action::LanHttpSettings,
             p,
         );
-    } else if matches!(&target, Some(Target::Manual(address)) if has_login_suffix(address)) {
+    } else if matches!(&target, Some(Target::Manual { base, .. }) if has_login_suffix(base)) {
         text(
             frame,
             line(rows[3], 3),

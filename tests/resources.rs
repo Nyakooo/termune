@@ -364,12 +364,13 @@ fn access_code_works_over_opted_in_lan_http() {
             .connect_with_challenge(&client, false, |_| panic!("unexpected probe"))
             .is_err()
     );
-    let ConnectionAttempt::AccessCode(candidate) = target
+    let ConnectionAttempt::AccessCode(challenge) = target
         .connect_with_challenge(&client, true, |_| {})
         .unwrap()
     else {
         panic!("expected access code prompt");
     };
+    let candidate = &challenge.candidate;
     assert!(
         candidate
             .verify_access_code(&client, "fixture", false)
@@ -395,6 +396,229 @@ fn access_code_works_over_opted_in_lan_http() {
             .iter()
             .all(|request| request.contains("os-access-code=access-fixture"))
     );
+}
+
+#[test]
+fn a_selected_protected_lan_route_receives_the_code_and_music_login() {
+    use termune::{Probe, connection::AccessChallenge};
+
+    let (proxy, handle) = mock_server(vec![
+        media(
+            "204 No Content",
+            "Set-Cookie: os-access-code=lan-fixture; Path=/\r\n",
+            b"",
+        ),
+        json_reply(json!({"serverGUID":"nas"})),
+        json_reply(json!({"userToken":"test-token"})),
+        json_reply(json!({"name":"tester","guid":"user"})),
+    ]);
+    let client = reqwest::blocking::Client::builder()
+        .proxy(reqwest::Proxy::http(proxy.as_str()).unwrap())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let lan = Candidate::new(
+        "http://192.168.42.1:5666".parse().unwrap(),
+        false,
+        "局域网 IPv4",
+    );
+    let relay = Candidate::new(
+        "https://relay.example.test".parse().unwrap(),
+        true,
+        "FN Connect 中继",
+    );
+    let challenge = AccessChallenge::from_probes(relay, &[Ok(Probe::AccessCode(lan))]);
+    let route = challenge.lan_challenge().unwrap();
+    let verified = route.verify_access_code(&client, "fixture", true).unwrap();
+    let connection = challenge.resume(&client, &verified, true, |_| {}).unwrap();
+    assert_eq!(connection.candidate.label, "局域网 IPv4");
+    connection
+        .candidate
+        .login(&client, "tester", "secret", "device")
+        .unwrap();
+
+    let requests = handle.join().unwrap();
+    assert!(requests[0].starts_with("GET http://192.168.42.1:5666/access_code_verify "));
+    assert!(requests[0].contains("x-access-code: Zml4dHVyZQ=="));
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|request| request.contains("os-access-code=lan-fixture"))
+    );
+    assert!(requests.iter().all(|request| {
+        request
+            .lines()
+            .next()
+            .unwrap()
+            .contains("http://192.168.42.1:5666/")
+            && !request.contains("mode=relay")
+    }));
+}
+
+#[test]
+fn relay_verification_promotes_only_the_matching_lan_route() {
+    use termune::{Probe, connection::AccessChallenge};
+
+    for (lan_guid, expected_host) in [("nas", "192.168.42.1"), ("other-nas", "192.168.42.2")] {
+        let (proxy, handle) = mock_server(vec![
+            media(
+                "204 No Content",
+                "Set-Cookie: os-access-code=access-fixture; Path=/\r\n",
+                b"",
+            ),
+            json_reply(json!({"serverGUID":"nas"})),
+            json_reply(json!({"serverGUID":lan_guid})),
+            json_reply(json!({"userToken":"test-token"})),
+            json_reply(json!({"name":"tester","guid":"user"})),
+        ]);
+        let client = reqwest::blocking::Client::builder()
+            .proxy(reqwest::Proxy::http(proxy.as_str()).unwrap())
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let lan = Candidate::new(
+            "http://192.168.42.1:5666".parse().unwrap(),
+            false,
+            "局域网 IPv4",
+        );
+        let relay = Candidate::new(
+            "http://192.168.42.2:5666".parse().unwrap(),
+            true,
+            "FN Connect 中继",
+        );
+        let challenge = AccessChallenge::from_probes(
+            relay,
+            &[Ok(Probe::Ready(lan, json!({"serverGUID":"nas"})))],
+        );
+        let verified = challenge
+            .candidate
+            .verify_access_code(&client, "fixture", true)
+            .unwrap();
+        let connection = challenge.resume(&client, &verified, true, |_| {}).unwrap();
+        assert_eq!(connection.candidate.base.host_str(), Some(expected_host));
+        connection
+            .candidate
+            .login(&client, "tester", "secret", "device")
+            .unwrap();
+
+        let requests = handle.join().unwrap();
+        assert!(requests[1].contains("os-access-code=access-fixture"));
+        assert!(requests[2].starts_with("GET http://192.168.42.1:5666/music/api/v1/sys/config "));
+        assert!(!requests[2].contains("os-access-code"));
+        assert!(requests[3].starts_with(&format!(
+            "POST http://{expected_host}:5666/music/api/v1/user/password-login "
+        )));
+        assert_eq!(
+            requests[3].contains("os-access-code=access-fixture"),
+            lan_guid != "nas"
+        );
+    }
+}
+
+#[test]
+fn prefixed_access_code_can_explicitly_use_the_same_hosts_root() {
+    use termune::connection::Target;
+
+    let (proxy, handle) = mock_server(vec![
+        media("404 Not Found", "", b""),
+        media(
+            "204 No Content",
+            "Set-Cookie: os-access-code=wrong-scope; Path=/nas-other\r\n",
+            b"",
+        ),
+        media(
+            "204 No Content",
+            "Set-Cookie: os-access-code=access-fixture; Path=/nas\r\n",
+            b"",
+        ),
+        json_reply(json!({"serverGUID":"nas"})),
+    ]);
+    let client = reqwest::blocking::Client::builder()
+        .proxy(reqwest::Proxy::http(proxy.as_str()).unwrap())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let candidate = Target::parse("http://192.168.42.1:5666/nas")
+        .unwrap()
+        .manual_candidate(true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        candidate
+            .verify_access_code(&client, "fixture", true)
+            .err()
+            .unwrap(),
+        termune::ACCESS_CODE_PATH_NOT_FOUND,
+    );
+    assert!(
+        candidate
+            .verify_access_code_at(&client, "fixture", true, true)
+            .err()
+            .unwrap()
+            .contains("Cookie 的路径未覆盖飞牛音乐接口")
+    );
+    let verified = candidate
+        .verify_access_code_at(&client, "fixture", true, true)
+        .unwrap();
+    assert!(verified.probe(&client).is_ok());
+    let requests = handle.join().unwrap();
+    assert!(requests[0].starts_with("GET http://192.168.42.1:5666/nas/access_code_verify "));
+    assert!(requests[1].starts_with("GET http://192.168.42.1:5666/access_code_verify "));
+    assert!(requests[2].starts_with("GET http://192.168.42.1:5666/access_code_verify "));
+    assert!(requests[3].starts_with("GET http://192.168.42.1:5666/nas/music/api/v1/sys/config "));
+    assert!(requests[3].contains("cookie: os-access-code=access-fixture"));
+}
+
+#[test]
+fn media_and_library_recognize_access_code_challenges_without_invalidating_music_token() {
+    let challenge = |status| {
+        media(
+        status,
+        "Content-Type: text/html; charset=utf-8\r\n",
+        br#"<script>fetch("/access_code_verify", {"x-access-code":"example","x-access-source":"web"})</script>"#,
+    )
+    };
+    let (session, handle) = logged_in(vec![
+        challenge("200 OK"),
+        challenge("401 Unauthorized"),
+        challenge("200 OK"),
+        challenge("200 OK"),
+        challenge("403 Forbidden"),
+        media(
+            "401 Unauthorized",
+            "Content-Type: text/html\r\n",
+            b"<html>Sign in</html>",
+        ),
+    ]);
+    let client = client(3).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let errors = [
+        session
+            .audio_response(&client, "track", Some("bytes=0-"))
+            .err()
+            .unwrap(),
+        session
+            .audio_response(&client, "track", Some("bytes=0-"))
+            .err()
+            .unwrap(),
+        session.audio(&client, "track").err().unwrap(),
+        session.cover(&client, "cover", cache.path()).err().unwrap(),
+        session.page(&client, "track", 1, None).err().unwrap(),
+    ];
+    for error in errors {
+        assert!(error.contains("验证访问码，请重新连接"));
+        assert!(!termune::is_auth_error(&error));
+    }
+    let error = session
+        .audio_response(&client, "track", None)
+        .err()
+        .unwrap();
+    assert_eq!(error, "音频 HTTP 401");
+    assert!(termune::is_auth_error(&error));
+    handle.join().unwrap();
 }
 
 #[test]

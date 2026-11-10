@@ -61,7 +61,7 @@ pub struct MediaReport {
 pub fn resource_headers(candidate: &Candidate, target: &Url, token: &str) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if candidate.sends_media_credentials_to(target) {
-        headers.insert(COOKIE, candidate.cookie_header(Some(token))?);
+        headers.insert(COOKIE, candidate.cookie_header(target, Some(token))?);
     }
     Ok(headers)
 }
@@ -86,9 +86,13 @@ impl Session {
         } else {
             "/favorite-track/delete"
         };
+        let url = self.candidate.endpoint(path)?;
         let response = client
-            .post(self.candidate.endpoint(path)?)
-            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
+            .post(url.clone())
+            .header(
+                COOKIE,
+                self.candidate.cookie_header(&url, Some(&self.token))?,
+            )
             .json(&serde_json::json!({"trackGUID":guid}))
             .send()
             .map_err(network_error)?;
@@ -124,8 +128,11 @@ impl Session {
         let mut url = self.candidate.endpoint("/lyric/list")?;
         url.query_pairs_mut().append_pair("trackGUID", guid);
         let response = client
-            .get(url)
-            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
+            .get(url.clone())
+            .header(
+                COOKIE,
+                self.candidate.cookie_header(&url, Some(&self.token))?,
+            )
             .send()
             .map_err(network_error)?;
         let data = business_data(response_json(response)?)?;
@@ -159,10 +166,7 @@ impl Session {
         let mut url = self.candidate.endpoint("/track/stream")?;
         url.query_pairs_mut().append_pair("guid", guid);
         let (response, _, _) = self.resource(client, url, range)?;
-        if !matches!(response.status().as_u16(), 200 | 206) {
-            return Err(format!("音频 HTTP {}", response.status().as_u16()));
-        }
-        let mime = media_type(&response);
+        let (response, mime) = check_media_response(response, "音频", true, "音频响应类型无效")?;
         if !mime.starts_with("audio/")
             && !matches!(
                 mime.as_str(),
@@ -190,8 +194,11 @@ impl Session {
             .append_pair("page", &page.to_string())
             .append_pair("size", &PAGE_SIZE.to_string());
         let response = client
-            .get(url)
-            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
+            .get(url.clone())
+            .header(
+                COOKIE,
+                self.candidate.cookie_header(&url, Some(&self.token))?,
+            )
             .send()
             .map_err(network_error)?;
         let parsed = parse_page(business_data(response_json(response)?)?)?;
@@ -225,8 +232,11 @@ impl Session {
             url.query_pairs_mut().append_pair("q", query);
         }
         let response = client
-            .get(url)
-            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
+            .get(url.clone())
+            .header(
+                COOKIE,
+                self.candidate.cookie_header(&url, Some(&self.token))?,
+            )
             .send()
             .map_err(network_error)?;
         let parsed = parse_page(business_data(response_json(response)?)?)?;
@@ -337,13 +347,11 @@ impl Session {
             .append_pair("coverId", cover_id)
             .append_pair("size", "800");
         let (response, redirects, cross_origin) = self.resource(client, url, None)?;
-        if response.status().as_u16() != 200 {
-            return Err(format!("封面 HTTP {}", response.status().as_u16()));
-        }
-        let mime = media_type(&response);
+        const INVALID_COVER: &str = "封面 Content-Type 或文件签名不是支持的 PNG/JPEG/GIF/WebP";
+        let (response, mime) = check_media_response(response, "封面", false, INVALID_COVER)?;
         let bytes = read_limited(response, MAX_COVER, true)?;
         if !valid_image(&mime, &bytes) {
-            return Err("封面 Content-Type 或文件签名不是支持的 PNG/JPEG/GIF/WebP".into());
+            return Err(INVALID_COVER.into());
         }
         // Fresh request on every run proves the network endpoint works. Cache is
         // scoped to origin, user GUID and cover ID; no signed URL/token is stored.
@@ -366,10 +374,9 @@ impl Session {
         // A small prefix (4 KiB) also permits signature checks for octet-stream.
         let (response, redirects, cross_origin) =
             self.resource(client, url, Some("bytes=0-4095"))?;
+        const INVALID_AUDIO: &str = "响应不是可识别的音频（可能是 JSON/HTML 错误页或未知格式）";
+        let (response, mime) = check_media_response(response, "音频", true, INVALID_AUDIO)?;
         let status = response.status().as_u16();
-        if !matches!(status, 200 | 206) {
-            return Err(format!("音频 HTTP {status}"));
-        }
         let expected = if status == 206 {
             Some(parse_content_range(
                 response
@@ -382,7 +389,6 @@ impl Session {
         } else {
             None
         };
-        let mime = media_type(&response);
         let bytes = read_limited(
             response,
             expected.unwrap_or(AUDIO_SAMPLE),
@@ -395,7 +401,7 @@ impl Session {
             return Err("音频长度与 Content-Range 不一致".into());
         }
         if !valid_audio(&mime, &bytes) {
-            return Err("响应不是可识别的音频（可能是 JSON/HTML 错误页或未知格式）".into());
+            return Err(INVALID_AUDIO.into());
         }
         Ok(MediaReport {
             status,
@@ -406,6 +412,31 @@ impl Session {
             range_supported: status == 206,
         })
     }
+}
+
+fn check_media_response(
+    response: Response,
+    label: &str,
+    allow_partial: bool,
+    invalid_html: &str,
+) -> Result<(Response, String)> {
+    let status = response.status().as_u16();
+    let accepted = status == 200 || (allow_partial && status == 206);
+    let mime = media_type(&response);
+    if mime == "text/html" {
+        if matches!(
+            crate::parse_response(response),
+            Ok(crate::ApiResponse::AccessCode)
+        ) {
+            return Err(crate::ACCESS_CODE_RECONNECT.into());
+        }
+        if accepted {
+            return Err(invalid_html.into());
+        }
+    } else if accepted {
+        return Ok((response, mime));
+    }
+    Err(format!("{label} HTTP {status}"))
 }
 
 fn media_type(response: &Response) -> String {
