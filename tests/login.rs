@@ -147,6 +147,13 @@ fn business_failure_is_not_empty_success_or_secret_echo() {
 }
 
 fn server(responses: Vec<(&'static str, String)>) -> (Candidate, thread::JoinHandle<Vec<String>>) {
+    server_with_content_type(responses, "application/json")
+}
+
+fn server_with_content_type(
+    responses: Vec<(&'static str, String)>,
+    content_type: &'static str,
+) -> (Candidate, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap())
         .parse()
@@ -180,18 +187,11 @@ fn server(responses: Vec<(&'static str, String)>) -> (Candidate, thread::JoinHan
                 }
             }
             requests.push(String::from_utf8(bytes).unwrap());
-            write!(stream, "HTTP/1.1 {headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(stream, "HTTP/1.1 {headers}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
         requests
     });
-    (
-        Candidate {
-            base,
-            relay: true,
-            label: "Mock",
-        },
-        handle,
-    )
+    (Candidate::new(base, true, "Mock"), handle)
 }
 
 #[test]
@@ -335,5 +335,23 @@ fn manual_probe_explains_404_without_rewriting_the_entered_path() {
         assert!(
             handle.join().unwrap()[0].starts_with(&format!("GET {path}/music/api/v1/sys/config "))
         );
+    }
+}
+
+#[test]
+fn probe_distinguishes_the_access_code_page_from_other_html() {
+    let challenge = r#"<script>fetch("/access_code_verify", { headers: { "x-access-code": "example", "x-access-source": "web" } })</script>"#;
+    for (body, required) in [(challenge, true), ("<html>Login page</html>", false)] {
+        let (candidate, handle) =
+            server_with_content_type(vec![("200 OK", body.into())], "text/html; charset=utf-8");
+        let result = candidate.probe_route(&client(3).unwrap());
+        assert_eq!(
+            matches!(&result, Ok(termune::Probe::AccessCode(_))),
+            required
+        );
+        if !required {
+            assert!(result.is_err());
+        }
+        handle.join().unwrap();
     }
 }

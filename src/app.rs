@@ -18,7 +18,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use termune::{Result, Session, connection::Target, library::Page};
+use termune::{
+    Candidate, Result, Session,
+    connection::{Connection, ConnectionAttempt, Target, complete_probe},
+    credentials::{KeyringStore, SavedSession, TokenStore},
+    library::Page,
+};
 
 pub const KINDS: [&str; 6] = ["album", "artist", "genre", "track", "favorite", "playlist"];
 pub const TRACKS: usize = 3;
@@ -89,6 +94,10 @@ enum Command {
         username: String,
         allow_http: bool,
     },
+    AccessCode {
+        id: u64,
+        code: String,
+    },
     Forget {
         target: String,
         username: String,
@@ -118,6 +127,7 @@ enum Command {
 enum Reply {
     Progress(u64, &'static str),
     Connected(u64, Result<Connected>),
+    AccessCode(u64, Option<String>),
     Forgotten(Result<()>),
     Media(u64, String, crate::media::Download),
     Page(Load, Result<Page>),
@@ -136,7 +146,25 @@ struct Connected {
 
 enum Authentication {
     Password(String, bool),
-    Restore,
+    Restore(SavedSession),
+}
+
+struct LoginRequest {
+    target: String,
+    username: String,
+    method: Authentication,
+    allow_http: bool,
+}
+
+enum LoginOutcome {
+    Connected(Session, Connected),
+    AccessCode(LoginRequest, Candidate),
+}
+
+#[derive(Default)]
+pub struct AccessPrompt {
+    pub input: String,
+    pub caret: Caret,
 }
 
 #[derive(Clone)]
@@ -154,6 +182,8 @@ pub enum Action {
     InputCaret(InputField, usize),
     Connect,
     ToggleRemember,
+    SubmitAccessCode,
+    SwitchAddress,
     Section(usize),
     Back,
     Row(usize),
@@ -259,6 +289,7 @@ pub struct App {
     notice: Option<TimedMessage>,
     pub connected: bool,
     pub restoring: bool,
+    pub access_prompt: Option<AccessPrompt>,
     pub server: String,
     pub username: String,
     pub route: Option<termune::Candidate>,
@@ -320,66 +351,124 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
         }
     };
     let mut session: Option<Session> = None;
+    let mut pending_access: Option<(u64, LoginRequest, Candidate)> = None;
     for command in rx {
         match command {
-            Command::Login {
-                id,
-                target,
-                username,
-                password,
-                allow_http,
-                remember,
-            } => {
+            command @ (Command::Login { id, .. }
+            | Command::Restore { id, .. }
+            | Command::AccessCode { id, .. }) => {
                 if latest.load(Ordering::Relaxed) != id {
                     continue;
                 }
                 session = None;
-                let result = authenticate(
-                    &client,
-                    &target,
-                    &username,
-                    allow_http,
-                    Authentication::Password(password, remember),
-                    (&latest, id),
-                    |stage| {
-                        let _ = tx.send(Reply::Progress(id, stage));
-                    },
-                );
-                let result = result.map(|(authenticated, connected)| {
-                    session = Some(authenticated);
-                    connected
-                });
-                let _ = tx.send(Reply::Connected(id, result));
-            }
-            Command::Restore {
-                id,
-                target,
-                username,
-                allow_http,
-            } => {
-                if latest.load(Ordering::Relaxed) != id {
-                    continue;
+                let attempt = (&*latest, id);
+                let progress = |stage| {
+                    let _ = tx.send(Reply::Progress(id, stage));
+                };
+                let result = match command {
+                    Command::Login {
+                        target,
+                        username,
+                        password,
+                        allow_http,
+                        remember,
+                        ..
+                    } => {
+                        pending_access = None;
+                        begin_login(
+                            &client,
+                            LoginRequest {
+                                target,
+                                username,
+                                method: Authentication::Password(password, remember),
+                                allow_http,
+                            },
+                            attempt,
+                            progress,
+                        )
+                    }
+                    Command::Restore {
+                        target,
+                        username,
+                        allow_http,
+                        ..
+                    } => {
+                        pending_access = None;
+                        progress("restore");
+                        Target::parse(&target)
+                            .and_then(|parsed| KeyringStore::new(parsed.as_str(), &username))
+                            .and_then(|store| store.load())
+                            .and_then(|saved| {
+                                saved.ok_or("没有已保存的登录状态，请输入密码登录".into())
+                            })
+                            .and_then(|saved| {
+                                begin_login(
+                                    &client,
+                                    LoginRequest {
+                                        target,
+                                        username,
+                                        method: Authentication::Restore(saved),
+                                        allow_http,
+                                    },
+                                    attempt,
+                                    progress,
+                                )
+                            })
+                    }
+                    Command::AccessCode { code, .. } => {
+                        let Some((challenge_id, request, candidate)) = pending_access.take() else {
+                            continue;
+                        };
+                        if challenge_id != id {
+                            continue;
+                        }
+                        progress("access_code");
+                        let verified =
+                            candidate.verify_access_code(&client, &code, request.allow_http);
+                        drop(code);
+                        if latest.load(Ordering::Relaxed) != id {
+                            continue;
+                        }
+                        let verified = match verified {
+                            Ok(candidate) => candidate,
+                            Err(error) => {
+                                pending_access = Some((id, request, candidate));
+                                let _ = tx.send(Reply::AccessCode(id, Some(error)));
+                                continue;
+                            }
+                        };
+                        verified
+                            .probe_route(&client)
+                            .and_then(|probe| complete_probe(&client, probe, progress))
+                            .and_then(|attempt_result| match attempt_result {
+                                ConnectionAttempt::Ready(connection) => {
+                                    finish_login(&client, request, connection, attempt, progress)
+                                        .map(|(session, connected)| {
+                                            LoginOutcome::Connected(session, connected)
+                                        })
+                                }
+                                ConnectionAttempt::AccessCode(_) => {
+                                    Err("飞牛未接受访问码会话，请检查 NAS 地址或反向代理".into())
+                                }
+                            })
+                    }
+                    _ => unreachable!(),
+                };
+                match result {
+                    Ok(LoginOutcome::Connected(authenticated, connected)) => {
+                        session = Some(authenticated);
+                        let _ = tx.send(Reply::Connected(id, Ok(connected)));
+                    }
+                    Ok(LoginOutcome::AccessCode(request, candidate)) => {
+                        pending_access = Some((id, request, candidate));
+                        let _ = tx.send(Reply::AccessCode(id, None));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Reply::Connected(id, Err(error)));
+                    }
                 }
-                session = None;
-                let result = authenticate(
-                    &client,
-                    &target,
-                    &username,
-                    allow_http,
-                    Authentication::Restore,
-                    (&latest, id),
-                    |stage| {
-                        let _ = tx.send(Reply::Progress(id, stage));
-                    },
-                );
-                let result = result.map(|(authenticated, connected)| {
-                    session = Some(authenticated);
-                    connected
-                });
-                let _ = tx.send(Reply::Connected(id, result));
             }
             Command::Forget { target, username } => {
-                use termune::credentials::TokenStore;
                 let result = termune::credentials::KeyringStore::new(&target, &username)
                     .and_then(|store| store.clear());
                 let _ = tx.send(Reply::Forgotten(result));
@@ -474,36 +563,49 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, latest: Arc<Atom
                     .and_then(|s| s.set_favorite(&client, &guid, enabled));
                 let _ = tx.send(Reply::Favorite(epoch, guid, enabled, result));
             }
-            Command::Logout => session = None,
+            Command::Logout => {
+                session = None;
+                pending_access = None;
+            }
         }
     }
 }
 
-fn authenticate(
+fn begin_login(
     client: &reqwest::blocking::Client,
-    target: &str,
-    username: &str,
-    allow_http: bool,
-    method: Authentication,
+    request: LoginRequest,
+    attempt: (&AtomicU64, u64),
+    mut progress: impl FnMut(&'static str),
+) -> Result<LoginOutcome> {
+    let target = Target::parse(&request.target)?;
+    match target.connect_with_challenge(client, request.allow_http, &mut progress)? {
+        ConnectionAttempt::Ready(connection) => {
+            finish_login(client, request, connection, attempt, progress)
+                .map(|(session, connected)| LoginOutcome::Connected(session, connected))
+        }
+        ConnectionAttempt::AccessCode(candidate) => {
+            Ok(LoginOutcome::AccessCode(request, candidate))
+        }
+    }
+}
+
+fn finish_login(
+    client: &reqwest::blocking::Client,
+    request: LoginRequest,
+    connection: Connection,
     attempt: (&AtomicU64, u64),
     mut progress: impl FnMut(&'static str),
 ) -> Result<(Session, Connected)> {
-    use termune::credentials::{KeyringStore, TokenStore};
+    let LoginRequest {
+        target: identity,
+        username,
+        method,
+        ..
+    } = request;
     let (latest, id) = attempt;
-    let target = Target::parse(target)?;
+    let target = Target::parse(&identity)?;
     let manual = matches!(target, Target::Manual(_));
     let identity = target.as_str();
-    let saved = if matches!(method, Authentication::Restore) {
-        progress("restore");
-        Some(
-            KeyringStore::new(identity, username)?
-                .load()?
-                .ok_or("没有已保存的登录状态，请输入密码登录")?,
-        )
-    } else {
-        None
-    };
-    let connection = target.connect(client, allow_http, &mut progress)?;
     if latest.load(Ordering::Relaxed) != id {
         return Err("连接已取消".into());
     }
@@ -517,14 +619,14 @@ fn authenticate(
             let authenticated =
                 connection
                     .candidate
-                    .login(client, username, &password, &crate::device_id()?)?;
+                    .login(client, &username, &password, &crate::device_id()?)?;
             if latest.load(Ordering::Relaxed) != id {
                 return Err("连接已取消".into());
             }
             let warning = if remember && manual && server_guid.is_none() {
                 Some("NAS 未提供设备身份，本次仍可使用，无法保存自动登录".into())
             } else if remember {
-                KeyringStore::new(identity, username)
+                KeyringStore::new(identity, &username)
                     .and_then(|store| {
                         termune::credentials::persist(
                             &store,
@@ -540,13 +642,12 @@ fn authenticate(
             let remembered = remember && warning.is_none();
             (authenticated, remembered, warning)
         }
-        Authentication::Restore => {
+        Authentication::Restore(saved) => {
             progress("restore");
-            let saved = saved.ok_or("没有保存的登录状态")?;
             if manual && saved.server_guid.is_none() {
                 return Err("保存的登录状态缺少 NAS 身份，请重新输入密码".into());
             }
-            let store = KeyringStore::new(identity, username)?;
+            let store = KeyringStore::new(identity, &username)?;
             let authenticated = termune::credentials::restore_saved(
                 &store,
                 &connection.candidate,
@@ -684,6 +785,7 @@ impl App {
             ],
             login_carets: [Caret::default(); 3],
             remember: config.auto_login,
+            access_prompt: None,
             focus: if !config.connection_target().is_empty() && !config.username.is_empty() {
                 2
             } else {
@@ -890,11 +992,46 @@ impl App {
             self.fail("后台任务已停止".into());
         }
     }
+    fn submit_access_code(&mut self) {
+        let Some(prompt) = self.access_prompt.as_mut().filter(|_| !self.busy) else {
+            return;
+        };
+        if prompt.input.trim().is_empty() {
+            return;
+        }
+        let code = std::mem::take(&mut prompt.input);
+        prompt.caret = Caret::default();
+        self.busy = true;
+        self.stage = "access_code";
+        self.clear_status();
+        if self
+            .tx
+            .send(Command::AccessCode {
+                id: self.generation,
+                code,
+            })
+            .is_err()
+        {
+            self.access_prompt = None;
+            self.fail("后台任务已停止".into());
+        }
+    }
+
     fn cancel(&mut self) {
+        self.access_prompt = None;
         self.restoring = false;
         self.next_id();
         self.busy = false;
     }
+
+    fn switch_address(&mut self) {
+        self.cancel();
+        self.clear_status();
+        self.focus = 0;
+        self.login_carets[0] = Caret::default();
+        let _ = self.tx.send(Command::Logout);
+    }
+
     fn logout(&mut self) {
         self.checkpoint_location();
         self.settings = None;
@@ -960,7 +1097,15 @@ impl App {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
                 Reply::Progress(id, stage) if id == self.generation => self.stage = stage,
+                Reply::AccessCode(id, error) if id == self.generation => {
+                    self.busy = false;
+                    self.access_prompt = Some(AccessPrompt::default());
+                    if let Some(error) = error {
+                        self.show_status(error, true);
+                    }
+                }
                 Reply::Connected(id, result) if id == self.generation => {
+                    self.access_prompt = None;
                     match result {
                         Ok(connected) => {
                             self.connected = true;
@@ -1672,6 +1817,11 @@ impl App {
                     self.focus = i;
                     self.login_carets[i].place(&self.fields[i], offset);
                 }
+                InputField::AccessCode => {
+                    if let Some(prompt) = &mut self.access_prompt {
+                        prompt.caret.place(&prompt.input, offset);
+                    }
+                }
                 InputField::Search => self.search_caret.place(&self.search_input, offset),
                 InputField::PlaylistName => {
                     if let Some(PlaylistDialog::Name { input, caret, .. }) =
@@ -1683,6 +1833,8 @@ impl App {
             },
             Action::Connect => self.connect(),
             Action::ToggleRemember => self.toggle_remember(),
+            Action::SubmitAccessCode => self.submit_access_code(),
+            Action::SwitchAddress => self.switch_address(),
             Action::Section(i) => self.switch(i),
             Action::Back => self.back(),
             Action::Row(i) => {
@@ -1812,6 +1964,15 @@ impl App {
             self.quit = true;
             return;
         }
+        if let Some(prompt) = &mut self.access_prompt {
+            match key.code {
+                KeyCode::Esc => self.switch_address(),
+                KeyCode::Enter if key.kind == KeyEventKind::Press => self.submit_access_code(),
+                _ if !self.busy => prompt.caret.key(&mut prompt.input, key),
+                _ => {}
+            }
+            return;
+        }
         if self.playlist_dialog.is_some() {
             self.playlist_key(key);
             return;
@@ -1930,7 +2091,9 @@ impl App {
 
         if !self.connected {
             if key.code == KeyCode::Esc {
-                if self.busy {
+                if self.restoring {
+                    self.switch_address();
+                } else if self.busy {
                     self.cancel();
                     let _ = self.tx.send(Command::Logout);
                 } else {
@@ -2066,7 +2229,11 @@ impl App {
                     .filter(|c| !c.is_control())
                     .take(4096)
                     .collect();
-                if !self.connected && !self.busy && self.focus < 3 {
+                if let Some(prompt) = &mut self.access_prompt {
+                    if !self.busy {
+                        prompt.caret.insert(&mut prompt.input, &value);
+                    }
+                } else if !self.connected && !self.busy && self.focus < 3 {
                     self.login_carets[self.focus].insert(&mut self.fields[self.focus], &value);
                 } else if let Some(PlaylistDialog::Name { input, caret, .. }) =
                     &mut self.playlist_dialog

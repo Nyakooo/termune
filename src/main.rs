@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     process::ExitCode,
 };
-use termune::{Candidate, Result, Session, connection::Target};
+use termune::{Candidate, Probe, Result, Session, connection::Target};
 
 fn prompt(label: &str) -> Result<String> {
     print!("{label}: ");
@@ -273,7 +273,7 @@ fn run() -> Result<()> {
             .map(|candidate| {
                 scope.spawn(move || {
                     let client = termune::client(if candidate.relay { 12 } else { 3 })?;
-                    candidate.probe(&client)
+                    candidate.probe_route(&client)
                 })
             })
             .collect();
@@ -284,14 +284,17 @@ fn run() -> Result<()> {
     });
     let relay_guid = results
         .iter()
-        .filter_map(|r| r.as_ref().ok())
-        .find(|(c, _)| c.relay)
-        .and_then(|(_, v)| v["serverGUID"].as_str())
+        .find_map(|result| match result {
+            Ok(Probe::Ready(candidate, config)) if candidate.relay => Some(config),
+            _ => None,
+        })
+        .and_then(|config| config["serverGUID"].as_str())
         .map(str::to_owned);
     let mut selected: Option<(Candidate, serde_json::Value)> = None;
+    let mut challenge: Option<Candidate> = None;
     for (candidate, result) in candidates.iter().zip(results) {
         match result {
-            Ok((c, config)) => {
+            Ok(Probe::Ready(c, config)) => {
                 if let Some(expected) = &relay_guid
                     && config["serverGUID"].as_str() != Some(expected.as_str())
                 {
@@ -307,6 +310,10 @@ fn run() -> Result<()> {
                     selected = Some((c, config));
                 }
             }
+            Ok(Probe::AccessCode(c)) => {
+                println!("  {} / {}: 需要飞牛访问码", c.label, c.base.scheme());
+                challenge.get_or_insert(c);
+            }
             Err(e) => println!(
                 "  {} / {}: FAIL — {e}",
                 candidate.label,
@@ -314,11 +321,21 @@ fn run() -> Result<()> {
             ),
         }
     }
-    let (candidate, config) = selected.ok_or(if direct {
-        "手动连接失败，请检查 NAS 地址、端口、TLS 证书和反向代理配置。"
+    let (candidate, config) = if let Some(selected) = selected {
+        selected
+    } else if let Some(challenge) = challenge {
+        let code = rpassword::prompt_password("飞牛访问码（隐藏输入）: ")
+            .map_err(|_| "无法安全读取访问码，请在交互终端中运行")?;
+        let verified = challenge.verify_access_code(&client, &code, allow_http)?;
+        drop(code);
+        verified.probe(&client)?
+    } else if direct {
+        return Err("手动连接失败，请检查 NAS 地址、端口、TLS 证书和反向代理配置。".into());
     } else {
-        "所有线路失败。HTTPS 直连可能因 IP 证书不匹配而失败；程序不会关闭证书验证。也请检查中继安全码设置。"
-    })?;
+        return Err(
+            "所有线路失败。HTTPS 直连可能因 IP 证书不匹配而失败，请检查网络和中继设置。".into(),
+        );
+    };
     println!(
         "选定线路：{} / {}",
         candidate.label,

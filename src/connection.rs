@@ -1,8 +1,8 @@
-use crate::{Candidate, Result};
+use crate::{Candidate, Probe, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::net::Ipv6Addr;
-use url::{Host, Url};
+use url::Url;
 
 pub const MANUAL_ROUTE: &str = "手动地址";
 
@@ -55,16 +55,16 @@ impl Target {
         {
             return Err(invalid.into());
         }
-        if url.scheme() == "http"
-            && !match url.host() {
-                Some(Host::Ipv4(ip)) => crate::is_lan_ip(ip.into()),
-                Some(Host::Ipv6(ip)) => crate::is_lan_ip(ip.into()),
-                _ => false,
-            }
-        {
+        if url.scheme() == "http" && !crate::is_lan_ip_host(&url) {
             return Err("HTTP 仅支持局域网 IP，请填写 HTTPS 地址".into());
         }
         let path = url.path().trim_end_matches('/').to_owned();
+        if path
+            .strip_prefix("/c/")
+            .is_some_and(|code| !code.is_empty())
+        {
+            return Err("请填写不含访问码的 NAS 基础地址，访问码将在连接时单独输入".into());
+        }
         url.set_path(&path);
         Ok(Self::Manual(url))
     }
@@ -87,25 +87,31 @@ impl Target {
         if self.requires_lan_http() && !allow_http {
             return Err("此地址使用 HTTP。请在设置中开启「局域网 HTTP」，或填写 HTTPS 地址".into());
         }
-        Ok(Some(Candidate {
-            base: base.clone(),
-            relay: false,
-            label: MANUAL_ROUTE,
-        }))
+        Ok(Some(Candidate::new(base.clone(), false, MANUAL_ROUTE)))
     }
 
     pub fn connect(
         &self,
         client: &Client,
         allow_http: bool,
-        mut progress: impl FnMut(&'static str),
+        progress: impl FnMut(&'static str),
     ) -> Result<Connection> {
+        match self.connect_with_challenge(client, allow_http, progress)? {
+            ConnectionAttempt::Ready(connection) => Ok(connection),
+            ConnectionAttempt::AccessCode(_) => Err("飞牛要求验证访问码".into()),
+        }
+    }
+
+    pub fn connect_with_challenge(
+        &self,
+        client: &Client,
+        allow_http: bool,
+        mut progress: impl FnMut(&'static str),
+    ) -> Result<ConnectionAttempt> {
         match self.manual_candidate(allow_http)? {
             Some(candidate) => {
                 progress("manual_probe");
-                let (candidate, config) = candidate.probe(client)?;
-                check_initialization(client, &candidate, &mut progress)?;
-                Ok(Connection { candidate, config })
+                complete_probe(client, candidate.probe_route(client)?, progress)
             }
             None => discover_connection(client, self.as_str(), allow_http, progress),
         }
@@ -117,14 +123,33 @@ pub struct Connection {
     pub config: Value,
 }
 
+pub enum ConnectionAttempt {
+    Ready(Connection),
+    AccessCode(Candidate),
+}
+
+pub fn complete_probe(
+    client: &Client,
+    probe: Probe,
+    progress: impl FnMut(&'static str),
+) -> Result<ConnectionAttempt> {
+    match probe {
+        Probe::Ready(candidate, config) => {
+            check_initialization(client, &candidate, progress)?;
+            Ok(ConnectionAttempt::Ready(Connection { candidate, config }))
+        }
+        Probe::AccessCode(candidate) => Ok(ConnectionAttempt::AccessCode(candidate)),
+    }
+}
+
 /// Same FN Connect discovery and identity checks as the verified CLI probe.
 /// Progress carries only fixed stage names, never URLs or credentials.
-pub fn discover_connection(
+fn discover_connection(
     client: &Client,
     id: &str,
     allow_http: bool,
     mut progress: impl FnMut(&'static str),
-) -> Result<Connection> {
+) -> Result<ConnectionAttempt> {
     let id = crate::validate_id(id)?;
     progress("discovery");
     let data = crate::discover(client, &id)?;
@@ -138,7 +163,7 @@ pub fn discover_connection(
             .iter()
             .map(|candidate| {
                 scope.spawn(move || {
-                    candidate.probe(&crate::client(if candidate.relay { 12 } else { 3 })?)
+                    candidate.probe_route(&crate::client(if candidate.relay { 12 } else { 3 })?)
                 })
             })
             .collect();
@@ -148,21 +173,29 @@ pub fn discover_connection(
     });
     let guid = results
         .iter()
-        .filter_map(|r| r.as_ref().ok())
-        .find(|(c, _)| c.relay)
-        .and_then(|(_, v)| v["serverGUID"].as_str())
+        .find_map(|result| match result {
+            Ok(Probe::Ready(candidate, config)) if candidate.relay => Some(config),
+            _ => None,
+        })
+        .and_then(|config| config["serverGUID"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let (candidate, config) = results
+    let challenge = results.iter().find_map(|result| match result {
+        Ok(Probe::AccessCode(candidate)) => Some(candidate.clone()),
+        _ => None,
+    });
+    let probe = results
         .into_iter()
         .filter_map(std::result::Result::ok)
-        .find(|(_, config)| {
-            guid.as_ref()
-                .is_none_or(|expected| config["serverGUID"].as_str() == Some(expected))
+        .find(|probe| match probe {
+            Probe::Ready(_, config) => guid
+                .as_ref()
+                .is_none_or(|expected| config["serverGUID"].as_str() == Some(expected)),
+            Probe::AccessCode(_) => false,
         })
+        .or_else(|| challenge.map(Probe::AccessCode))
         .ok_or("所有连接线路失败：请检查网络、TLS 证书、中继安全码和 NAS 在线状态")?;
-    check_initialization(client, &candidate, &mut progress)?;
-    Ok(Connection { candidate, config })
+    complete_probe(client, probe, progress)
 }
 
 fn check_initialization(

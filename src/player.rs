@@ -214,18 +214,14 @@ mod tests {
                 }
             }
         });
-        let session = termune::Candidate {
-            base,
-            relay: false,
-            label: "test",
-        }
-        .login(
-            &termune::client(3).unwrap(),
-            "test",
-            "fake-password",
-            "device",
-        )
-        .unwrap();
+        let session = termune::Candidate::new(base, false, "test")
+            .login(
+                &termune::client(3).unwrap(),
+                "test",
+                "fake-password",
+                "device",
+            )
+            .unwrap();
         let mut player = Player::start(
             termune::stream::AudioSource {
                 session,

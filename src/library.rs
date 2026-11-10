@@ -1,7 +1,7 @@
-use crate::{Result, Session, business_data, cookie, network_error, response_json};
+use crate::{Candidate, Result, Session, business_data, network_error, response_json};
 use reqwest::{
     blocking::{Client, Response},
-    header::{CONTENT_RANGE, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, LOCATION, RANGE},
+    header::{CONTENT_RANGE, CONTENT_TYPE, COOKIE, HeaderMap, LOCATION, RANGE},
 };
 use serde_json::Value;
 use std::{collections::HashSet, io::Read, path::Path};
@@ -58,13 +58,10 @@ pub struct MediaReport {
 
 // The Cookie is recreated on every hop against the original authenticated
 // origin, never copied from a response or sent to a CDN, including mode=relay.
-pub fn resource_headers(origin: &Url, target: &Url, relay: bool, token: &str) -> Result<HeaderMap> {
+pub fn resource_headers(candidate: &Candidate, target: &Url, token: &str) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
-    if origin.origin() == target.origin() {
-        let mut value =
-            HeaderValue::from_str(&cookie(relay, Some(token))?).map_err(|_| "Cookie 格式错误")?;
-        value.set_sensitive(true);
-        headers.insert(COOKIE, value);
+    if candidate.sends_media_credentials_to(target) {
+        headers.insert(COOKIE, candidate.cookie_header(Some(token))?);
     }
     Ok(headers)
 }
@@ -91,7 +88,7 @@ impl Session {
         };
         let response = client
             .post(self.candidate.endpoint(path)?)
-            .header(COOKIE, cookie(self.candidate.relay, Some(&self.token))?)
+            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
             .json(&serde_json::json!({"trackGUID":guid}))
             .send()
             .map_err(network_error)?;
@@ -128,7 +125,7 @@ impl Session {
         url.query_pairs_mut().append_pair("trackGUID", guid);
         let response = client
             .get(url)
-            .header(COOKIE, cookie(self.candidate.relay, Some(&self.token))?)
+            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
             .send()
             .map_err(network_error)?;
         let data = business_data(response_json(response)?)?;
@@ -194,7 +191,7 @@ impl Session {
             .append_pair("size", &PAGE_SIZE.to_string());
         let response = client
             .get(url)
-            .header(COOKIE, cookie(self.candidate.relay, Some(&self.token))?)
+            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
             .send()
             .map_err(network_error)?;
         let parsed = parse_page(business_data(response_json(response)?)?)?;
@@ -229,7 +226,7 @@ impl Session {
         }
         let response = client
             .get(url)
-            .header(COOKIE, cookie(self.candidate.relay, Some(&self.token))?)
+            .header(COOKIE, self.candidate.cookie_header(Some(&self.token))?)
             .send()
             .map_err(network_error)?;
         let parsed = parse_page(business_data(response_json(response)?)?)?;
@@ -304,9 +301,8 @@ impl Session {
                 return Err("媒体跳转循环".into());
             }
             let mut request = client.get(current.clone()).headers(resource_headers(
-                origin,
+                &self.candidate,
                 &current,
-                self.candidate.relay,
                 &self.token,
             )?);
             if let Some(range) = range {

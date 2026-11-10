@@ -177,13 +177,9 @@ fn logged_in(replies: Vec<Reply>) -> (Session, thread::JoinHandle<Vec<String>>) 
     ];
     all.extend(replies);
     let (base, handle) = mock_server(all);
-    let session = Candidate {
-        base,
-        relay: true,
-        label: "Mock",
-    }
-    .login(&client(3).unwrap(), "tester", "secret", "device")
-    .unwrap();
+    let session = Candidate::new(base, true, "Mock")
+        .login(&client(3).unwrap(), "tester", "secret", "device")
+        .unwrap();
     (session, handle)
 }
 
@@ -341,6 +337,67 @@ fn manual_target_connects_through_a_path_prefix_to_login_library_and_media() {
 }
 
 #[test]
+fn access_code_works_over_opted_in_lan_http() {
+    use termune::connection::{ConnectionAttempt, Target, complete_probe};
+
+    let (proxy, handle) = mock_server(vec![
+        media(
+            "200 OK",
+            "Content-Type: text/html\r\n",
+            br#"<script>fetch("/access_code_verify", {"x-access-code":"example","x-access-source":"web"})</script>"#,
+        ),
+        media("204 No Content", "Set-Cookie: os-access-code=access-fixture; Path=/\r\n", b""),
+        json_reply(json!({"serverGUID":"nas"})),
+        json_reply(json!({"initialized":true})),
+        json_reply(json!({"userToken":"test-token"})),
+        json_reply(json!({"name":"tester","guid":"user"})),
+    ]);
+    let client = reqwest::blocking::Client::builder()
+        .proxy(reqwest::Proxy::http(proxy.as_str()).unwrap())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let target = Target::parse("http://192.168.42.1:5666").unwrap();
+    assert!(
+        target
+            .connect_with_challenge(&client, false, |_| panic!("unexpected probe"))
+            .is_err()
+    );
+    let ConnectionAttempt::AccessCode(candidate) = target
+        .connect_with_challenge(&client, true, |_| {})
+        .unwrap()
+    else {
+        panic!("expected access code prompt");
+    };
+    assert!(
+        candidate
+            .verify_access_code(&client, "fixture", false)
+            .is_err()
+    );
+    let verified = candidate
+        .verify_access_code(&client, "fixture", true)
+        .unwrap();
+    let ConnectionAttempt::Ready(connection) =
+        complete_probe(&client, verified.probe_route(&client).unwrap(), |_| {}).unwrap()
+    else {
+        panic!("expected verified NAS");
+    };
+    connection
+        .candidate
+        .login(&client, "tester", "secret", "device")
+        .unwrap();
+    let requests = handle.join().unwrap();
+    assert!(requests[1].starts_with("GET http://192.168.42.1:5666/access_code_verify "));
+    assert!(requests[1].contains("x-access-code: Zml4dHVyZQ=="));
+    assert!(
+        requests[2..]
+            .iter()
+            .all(|request| request.contains("os-access-code=access-fixture"))
+    );
+}
+
+#[test]
 fn page_parser_accepts_numeric_string_and_rejects_broken_structure() {
     let parsed =
         parse_page(json!({"list":[{"guid":"one","title":null,"duration":"123"}],"total":"1"}))
@@ -360,14 +417,19 @@ fn page_parser_accepts_numeric_string_and_rejects_broken_structure() {
 
 #[test]
 fn media_redirects_strip_all_cookies_across_scheme_host_and_port() {
-    let origin = "https://nas.example:8443".parse().unwrap();
+    let origin: url::Url = "https://nas.example:8443".parse().unwrap();
     for address in [
         "https://nas.example:8443/cover",
         "https://nas.example:8443/stream?signature=secret",
     ] {
         let target = address.parse().unwrap();
         assert_eq!(
-            resource_headers(&origin, &target, true, "test-token").unwrap()["cookie"],
+            resource_headers(
+                &Candidate::new(origin.clone(), true, "Mock"),
+                &target,
+                "test-token"
+            )
+            .unwrap()["cookie"],
             "mode=relay; music-token=test-token"
         );
     }
@@ -377,9 +439,13 @@ fn media_redirects_strip_all_cookies_across_scheme_host_and_port() {
         "http://nas.example:8443/stream",
     ] {
         assert!(
-            !resource_headers(&origin, &address.parse().unwrap(), true, "test-token")
-                .unwrap()
-                .contains_key("cookie")
+            !resource_headers(
+                &Candidate::new(origin.clone(), true, "Mock"),
+                &address.parse().unwrap(),
+                "test-token"
+            )
+            .unwrap()
+            .contains_key("cookie")
         );
     }
     assert_eq!(

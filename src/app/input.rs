@@ -4,6 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Clone, Copy)]
 pub enum InputField {
     Login(usize),
+    AccessCode,
     Search,
     PlaylistName,
 }

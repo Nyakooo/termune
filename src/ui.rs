@@ -171,6 +171,7 @@ fn status(a: &App, p: Palette) -> (String, Color) {
             "restore" => a.text("验证已保存的登录状态…", "Checking saved session…"),
             "discovery" => a.text("查询 FN ID…", "Resolving FN ID…"),
             "manual_probe" => a.text("检测 NAS 地址…", "Checking NAS address…"),
+            "access_code" => a.text("验证飞牛访问码…", "Verifying Feiniu access code…"),
             "probing" => a.text("选择连接线路…", "Selecting connection route…"),
             "initialization" => a.text("检查音乐服务…", "Checking music service…"),
             "login" => a.text("登录并验证身份…", "Signing in…"),
@@ -244,12 +245,22 @@ pub fn draw(f: &mut Frame, a: &mut App) {
             .style(Style::default().fg(p.accent)),
             panel,
         );
+        if a.access_prompt.is_none() {
+            let label = a.text("[Esc 切换地址]", "[Esc Switch address]");
+            let button_area = center(line(panel, 6), Line::from(label).width() as u16, 1);
+            button(f, a, button_area, label, Action::SwitchAddress, p);
+        }
     } else {
         login(f, a, parts[1], p);
     }
     let footer = parts[2];
     text(f, line(footer, 0), message, message_color);
-    let help = if a.connected {
+    let help = if a.access_prompt.is_some() {
+        a.text(
+            "Enter 验证   Esc 切换地址",
+            "Enter Verify   Esc Switch address",
+        )
+    } else if a.connected {
         if area.width >= 105 {
             a.text("↑↓ 选择  Tab 分类  ←→/hl 翻页  Enter 播放/打开  / 搜索  M 极简  O 模式  ? 帮助  Q 退出","↑↓ Select  Tab Library  ←→/hl Page  Enter Play/Open  / Search  M Minimal  O Mode  ? Help  Q Quit")
         } else if area.width >= 65 {
@@ -265,8 +276,8 @@ pub fn draw(f: &mut Frame, a: &mut App) {
         }
     } else if a.restoring {
         a.text(
-            "Esc 取消恢复  Ctrl+C 退出",
-            "Esc Cancel restore  Ctrl+C Quit",
+            "Esc 切换地址   Ctrl+C 退出",
+            "Esc Switch address   Ctrl+C Quit",
         )
     } else {
         a.text("Tab 切换焦点   Esc 退出", "Tab Focus   Esc Quit")
@@ -288,6 +299,10 @@ pub fn draw(f: &mut Frame, a: &mut App) {
     if a.playlist_dialog.is_some() {
         a.hits.clear();
         playlist_dialog(f, a, area, p);
+    }
+    if a.access_prompt.is_some() {
+        a.hits.clear();
+        access_code_dialog(f, a, area, p);
     }
     playback_menu(f, a, parts[1], p);
 }
@@ -386,7 +401,7 @@ fn login_header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
         ));
     }
     f.render_widget(Paragraph::new(brand), cols[0]);
-    if !a.busy {
+    if !a.busy && !a.restoring && a.access_prompt.is_none() {
         buttons(
             f,
             a,
@@ -404,6 +419,57 @@ fn login_header(f: &mut Frame, a: &mut App, r: Rect, p: Palette) {
             .border_style(Style::default().fg(p.edge)),
         line(r, 1),
     );
+}
+
+fn access_code_dialog(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
+    let verify = app.text("[Enter 验证]", "[Enter Verify]");
+    let switch = app.text("[Esc 切换地址]", "[Esc Switch address]");
+    let verify_width = Line::from(verify).width() as u16;
+    let switch_width = Line::from(switch).width() as u16;
+    let switch_offset = verify_width + 3;
+    let stacked = switch_offset + switch_width > area.width.min(54).saturating_sub(4);
+    let modal = center(area, 54, if stacked { 8 } else { 7 });
+    frame.render_widget(Clear, modal);
+    let block = pane(app.text("飞牛访问码", "Feiniu access code").into(), p, true);
+    let inner = inset(block.inner(modal), 1, 0);
+    frame.render_widget(block, modal);
+    text(
+        frame,
+        line(inner, 1),
+        app.text("验证访问码后继续登录", "Verify the access code to continue"),
+        p.dim,
+    );
+    let prompt = app.access_prompt.as_mut().unwrap();
+    let hits = input_line(
+        frame,
+        line(inner, 2),
+        &prompt.input,
+        &mut prompt.caret,
+        true,
+        !app.busy,
+        Style::default().fg(p.fg).bg(p.selected),
+    );
+    let actions = line(inner, 4);
+    let verify_area = Rect {
+        width: verify_width,
+        ..actions
+    };
+    if app.busy {
+        text(frame, verify_area, app.text("验证中…", "Verifying…"), p.dim);
+    } else {
+        app.hits.extend(
+            hits.into_iter()
+                .map(|(rect, offset)| (rect, Action::InputCaret(InputField::AccessCode, offset))),
+        );
+        button(frame, app, verify_area, verify, Action::SubmitAccessCode, p);
+    }
+    let (x, y) = if stacked {
+        (inner.x, actions.y + 1)
+    } else {
+        (actions.x + switch_offset, actions.y)
+    };
+    let switch_area = Rect::new(x, y, switch_width, 1);
+    button(frame, app, switch_area, switch, Action::SwitchAddress, p);
 }
 
 fn input_line(

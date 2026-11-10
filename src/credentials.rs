@@ -163,11 +163,7 @@ mod tests {
     #[test]
     fn opt_in_persists_token_only_and_opt_out_deletes_it() {
         let session = Session {
-            candidate: crate::Candidate {
-                base: "https://example.com".parse().unwrap(),
-                relay: true,
-                label: "test",
-            },
+            candidate: crate::Candidate::new("https://example.com".parse().unwrap(), true, "test"),
             token: "test-token".into(),
             user: serde_json::json!({"guid":"user-id","name":"tester"}),
         };
@@ -242,11 +238,7 @@ mod tests {
                 write!(socket,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             });
             let store = Memory(RefCell::new(Some(saved())));
-            let candidate = crate::Candidate {
-                base,
-                relay: true,
-                label: "test",
-            };
+            let candidate = crate::Candidate::new(base, true, "test");
             let result = restore_saved(
                 &store,
                 &candidate,
@@ -262,11 +254,8 @@ mod tests {
     #[test]
     fn changed_nas_is_rejected_before_sending_token() {
         let store = Memory(RefCell::new(Some(saved())));
-        let candidate = crate::Candidate {
-            base: "https://example.invalid".parse().unwrap(),
-            relay: true,
-            label: "test",
-        };
+        let candidate =
+            crate::Candidate::new("https://example.invalid".parse().unwrap(), true, "test");
         let result = restore_saved(
             &store,
             &candidate,
@@ -286,11 +275,7 @@ mod tests {
             .unwrap();
         drop(listener);
         let store = Memory(RefCell::new(Some(saved())));
-        let candidate = crate::Candidate {
-            base,
-            relay: false,
-            label: "test",
-        };
+        let candidate = crate::Candidate::new(base, false, "test");
         assert!(
             restore_saved(
                 &store,

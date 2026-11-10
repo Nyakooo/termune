@@ -1,5 +1,7 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{
     blocking::{Client, Response},
+    header::{CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE},
     redirect::Policy,
 };
 use serde_json::{Value, json};
@@ -63,6 +65,18 @@ pub fn network_error(e: reqwest::Error) -> String {
 
 // Never expose server messages, response bodies, signed URLs, cookies or reqwest URLs.
 pub fn response_json(response: Response) -> Result<Value> {
+    match parse_response(response)? {
+        ApiResponse::Json(value) => Ok(value),
+        ApiResponse::AccessCode => Err("飞牛要求验证访问码，请重新连接".into()),
+    }
+}
+
+enum ApiResponse {
+    Json(Value),
+    AccessCode,
+}
+
+fn parse_response(response: Response) -> Result<ApiResponse> {
     let status = response.status();
     if !status.is_success() {
         return Err(format!(
@@ -75,6 +89,14 @@ pub fn response_json(response: Response) -> Result<Value> {
             }
         ));
     }
+    let html = response.headers().get(CONTENT_TYPE).is_some_and(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("text/html"))
+        })
+    });
     let mut bytes = Vec::new();
     response
         .take(MAX_JSON + 1)
@@ -83,7 +105,19 @@ pub fn response_json(response: Response) -> Result<Value> {
     if bytes.len() as u64 > MAX_JSON {
         return Err("JSON 响应超过 1 MiB 限制".into());
     }
+    if html
+        && [
+            b"/access_code_verify".as_slice(),
+            b"x-access-code",
+            b"x-access-source",
+        ]
+        .iter()
+        .all(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+    {
+        return Ok(ApiResponse::AccessCode);
+    }
     serde_json::from_slice(&bytes)
+        .map(ApiResponse::Json)
         .map_err(|_| "响应不是有效 JSON（可能是远程连接页或安全码页面）".into())
 }
 
@@ -151,17 +185,31 @@ pub fn discover(client: &Client, id: &str) -> Result<Value> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Candidate {
     pub base: Url,
     pub relay: bool,
     pub label: &'static str,
+    access_cookie: Option<String>,
+}
+
+pub enum Probe {
+    Ready(Candidate, Value),
+    AccessCode(Candidate),
 }
 
 fn is_lan_ip(addr: std::net::IpAddr) -> bool {
     match addr {
         std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
         std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
+}
+
+fn is_lan_ip_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_lan_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => is_lan_ip(ip.into()),
+        _ => false,
     }
 }
 
@@ -207,11 +255,7 @@ pub fn candidates(data: &Value, allow_http: bool) -> Vec<Candidate> {
                     continue;
                 }
                 if let Ok(base) = Url::parse(&format!("{scheme}://{host}:{port}")) {
-                    result.push(Candidate {
-                        base,
-                        relay: false,
-                        label,
-                    });
+                    result.push(Candidate::new(base, false, label));
                 }
             }
         }
@@ -233,7 +277,7 @@ pub fn candidates(data: &Value, allow_http: bool) -> Vec<Candidate> {
             {
                 continue;
             }
-            result.push(Candidate { base, relay, label });
+            result.push(Candidate::new(base, relay, label));
         }
     }
     result
@@ -245,11 +289,7 @@ pub fn cookie(relay: bool, token: Option<&str>) -> Result<String> {
         parts.push("mode=relay".to_owned());
     }
     if let Some(token) = token {
-        if token.is_empty()
-            || !token
-                .bytes()
-                .all(|b| matches!(b, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e))
-        {
+        if !valid_cookie_value(token) {
             return Err("服务器返回无效 Token 格式".into());
         }
         parts.push(format!("music-token={token}"));
@@ -257,7 +297,111 @@ pub fn cookie(relay: bool, token: Option<&str>) -> Result<String> {
     Ok(parts.join("; "))
 }
 
+fn valid_cookie_value(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| matches!(b, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e))
+}
+
 impl Candidate {
+    pub fn new(base: Url, relay: bool, label: &'static str) -> Self {
+        Self {
+            base,
+            relay,
+            label,
+            access_cookie: None,
+        }
+    }
+
+    pub(crate) fn cookie_header(&self, token: Option<&str>) -> Result<HeaderValue> {
+        let mut value = cookie(self.relay, token)?;
+        if let Some(access) = &self.access_cookie {
+            if !value.is_empty() {
+                value.push_str("; ");
+            }
+            value.push_str("os-access-code=");
+            value.push_str(access);
+        }
+        let mut header = HeaderValue::from_str(&value).map_err(|_| "Cookie 格式错误")?;
+        header.set_sensitive(true);
+        Ok(header)
+    }
+
+    pub(crate) fn sends_media_credentials_to(&self, url: &Url) -> bool {
+        self.base.origin() == url.origin()
+            && (self.access_cookie.is_none() || self.includes_path(url.path()))
+    }
+
+    fn includes_path(&self, path: &str) -> bool {
+        let prefix = self.base.path().trim_end_matches('/');
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+
+    pub fn verify_access_code(
+        &self,
+        client: &Client,
+        code: &str,
+        allow_http: bool,
+    ) -> Result<Self> {
+        let https = self.base.scheme() == "https";
+        if !https && !(self.base.scheme() == "http" && allow_http && is_lan_ip_host(&self.base)) {
+            return Err("访问码验证需使用 HTTPS 或已允许的局域网 HTTP 地址".into());
+        }
+        let code = code.trim();
+        if code.is_empty() {
+            return Err("请输入飞牛访问码".into());
+        }
+        let url = format!(
+            "{}/access_code_verify",
+            self.base.as_str().trim_end_matches('/')
+        );
+        let mut header =
+            HeaderValue::from_str(&STANDARD.encode(code)).map_err(|_| "访问码格式无效")?;
+        header.set_sensitive(true);
+        let response = client
+            .get(url)
+            .header("X-Access-Code", header)
+            .header("X-Access-Source", "web")
+            .header(COOKIE, self.cookie_header(None)?)
+            .send()
+            .map_err(network_error)?;
+        match response.status().as_u16() {
+            401 | 403 | 404 => return Err("飞牛访问码验证未通过，请核对访问码和 NAS 地址".into()),
+            429 => return Err("访问码尝试过于频繁，请稍后重试".into()),
+            _ if !response.status().is_success() => {
+                return Err(format!(
+                    "飞牛访问码验证失败（HTTP {}）",
+                    response.status().as_u16()
+                ));
+            }
+            _ => {}
+        }
+        let (access, secure) = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|header| header.to_str().ok())
+            .find_map(|header| {
+                let mut parts = header.split(';');
+                let value = parts.next()?.trim().strip_prefix("os-access-code=")?;
+                valid_cookie_value(value).then(|| {
+                    (
+                        value,
+                        parts.any(|attr| attr.trim().eq_ignore_ascii_case("secure")),
+                    )
+                })
+            })
+            .ok_or("飞牛访问码验证响应缺少有效的会话 Cookie")?;
+        if secure && !https {
+            return Err("NAS 返回的访问码会话要求 HTTPS，请使用 HTTPS 地址".into());
+        }
+        let mut candidate = self.clone();
+        candidate.access_cookie = Some(access.to_owned());
+        Ok(candidate)
+    }
+
     pub(crate) fn endpoint(&self, path: &str) -> Result<Url> {
         Url::parse(&format!(
             "{}{API}{path}",
@@ -269,7 +413,7 @@ impl Candidate {
         let url = self.endpoint(path)?;
         let response = client
             .get(url)
-            .header("Cookie", cookie(self.relay, token)?)
+            .header(COOKIE, self.cookie_header(token)?)
             .send()
             .map_err(network_error)?;
         business_data(response_json(response)?)
@@ -277,13 +421,13 @@ impl Candidate {
 
     // Only unauthenticated discovery GETs may follow redirects. Cookie is rebuilt
     // per hop, never transferred; the chosen endpoint is fixed before login.
-    pub fn probe(&self, client: &Client) -> Result<(Self, Value)> {
+    pub fn probe_route(&self, client: &Client) -> Result<Probe> {
         let mut candidate = self.clone();
         for _ in 0..=5 {
             let url = candidate.endpoint("/sys/config")?;
             let response = client
                 .get(url.clone())
-                .header("Cookie", cookie(candidate.relay, None)?)
+                .header(COOKIE, candidate.cookie_header(None)?)
                 .send()
                 .map_err(network_error)?;
             if response.status().is_redirection() {
@@ -316,6 +460,11 @@ impl Candidate {
                     }
                     .into());
                 }
+                if candidate.access_cookie.is_some()
+                    && path.trim_end_matches('/') != candidate.base.path().trim_end_matches('/')
+                {
+                    return Err("飞牛音乐接口改变了已验证的路径，请填写最终 NAS 地址".into());
+                }
                 target.set_path(&path);
                 candidate.base = target;
                 continue;
@@ -330,9 +479,24 @@ impl Candidate {
                 }
                 .into());
             }
-            return Ok((candidate, business_data(response_json(response)?)?));
+            return match parse_response(response)? {
+                ApiResponse::Json(value) => Ok(Probe::Ready(candidate, business_data(value)?)),
+                ApiResponse::AccessCode if self.includes_path(candidate.base.path()) => {
+                    Ok(Probe::AccessCode(candidate))
+                }
+                ApiResponse::AccessCode => {
+                    Err("访问码页面超出填写的 NAS 路径，请核对最终 NAS 地址".into())
+                }
+            };
         }
         Err("跳转超过 5 次".into())
+    }
+
+    pub fn probe(&self, client: &Client) -> Result<(Self, Value)> {
+        match self.probe_route(client)? {
+            Probe::Ready(candidate, value) => Ok((candidate, value)),
+            Probe::AccessCode(_) => Err("飞牛要求验证访问码".into()),
+        }
     }
 
     pub fn login(
@@ -343,7 +507,7 @@ impl Candidate {
         device_id: &str,
     ) -> Result<Session> {
         let url = self.endpoint("/user/password-login")?;
-        let response = client.post(url).header("Cookie", cookie(self.relay, None)?)
+        let response = client.post(url).header(COOKIE, self.cookie_header(None)?)
             .json(&json!({"username": username, "password": hash_password(password), "deviceId": device_id}))
             .send().map_err(network_error)?;
         let data = business_data(response_json(response)?)?;
@@ -380,4 +544,33 @@ pub struct Session {
 
 pub fn is_auth_error(error: &str) -> bool {
     error.contains("HTTP 401") || error.contains("会话失效")
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    #[test]
+    fn access_session_sends_both_cookies_only_to_the_selected_route() {
+        let mut route = Candidate::new("https://nas.example/nas".parse().unwrap(), true, "test");
+        route.access_cookie = Some("access-fixture".into());
+        let api = route.endpoint("/track/stream").unwrap();
+        let headers = library::resource_headers(&route, &api, "music-fixture").unwrap();
+        assert_eq!(
+            headers[COOKIE],
+            "mode=relay; music-token=music-fixture; os-access-code=access-fixture"
+        );
+        assert!(headers[COOKIE].is_sensitive());
+        for address in [
+            "https://nas.example/nas-other/music/track",
+            "https://nas.example/media",
+            "https://cdn.example/nas/music/track",
+            "http://nas.example/nas/music/track",
+        ] {
+            let headers =
+                library::resource_headers(&route, &address.parse().unwrap(), "music-fixture")
+                    .unwrap();
+            assert!(!headers.contains_key(COOKIE));
+        }
+    }
 }

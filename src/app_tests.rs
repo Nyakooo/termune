@@ -15,11 +15,11 @@ fn app() -> App {
 }
 
 fn relay_route() -> termune::Candidate {
-    termune::Candidate {
-        base: "https://relay.example.test".parse().unwrap(),
-        relay: true,
-        label: "FN Connect 中继",
-    }
+    termune::Candidate::new(
+        "https://relay.example.test".parse().unwrap(),
+        true,
+        "FN Connect 中继",
+    )
 }
 
 #[test]
@@ -495,6 +495,78 @@ fn login_hint_matches_the_entered_address_and_protocol() {
 }
 
 #[test]
+fn access_code_prompt_masks_input_retries_and_ignores_cancelled_attempts() {
+    let mut app = app();
+    let (tx, commands) = mpsc::channel();
+    app.tx = tx;
+    let (replies, rx) = mpsc::channel();
+    app.rx = rx;
+    app.fields = [
+        "https://nas.example".into(),
+        "tester".into(),
+        "music-fixture".into(),
+    ];
+    app.connect();
+    let Ok(Command::Login { id, .. }) = commands.try_recv() else {
+        panic!("expected music login");
+    };
+    replies.send(Reply::AccessCode(id, None)).unwrap();
+    app.replies();
+    app.event(Event::Paste("access-fixture".into()));
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("飞牛访问码"));
+    assert!(screen.contains("••••"));
+    assert!(!screen.contains("access-fixture"));
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::AccessCode { id: attempt, code }) if attempt == id && code == "access-fixture"
+    ));
+    assert!(app.access_prompt.as_ref().unwrap().input.is_empty());
+    replies
+        .send(Reply::AccessCode(id, Some("访问码验证未通过".into())))
+        .unwrap();
+    app.replies();
+    assert!(render(&mut app, 80, 24).contains("访问码验证未通过"));
+    assert!(commands.try_recv().is_err());
+
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(commands.try_recv(), Ok(Command::Logout)));
+    replies.send(Reply::AccessCode(id, None)).unwrap();
+    app.replies();
+    assert!(app.access_prompt.is_none());
+    assert_eq!(app.fields[0], "https://nas.example/");
+}
+
+#[test]
+fn access_code_actions_share_a_row_when_they_fit_and_stay_put_during_verification() {
+    for (width, english, stacked) in [(36, false, false), (36, true, true), (80, true, false)] {
+        let mut app = app();
+        app.config.english = english;
+        app.access_prompt = Some(AccessPrompt::default());
+        render(&mut app, width, 20);
+        let hit = |app: &App, predicate: fn(Action) -> bool| {
+            app.hits
+                .iter()
+                .find_map(|(rect, action)| predicate(*action).then_some(*rect))
+        };
+        let verify = |action| matches!(action, Action::SubmitAccessCode);
+        let switch = |action| matches!(action, Action::SwitchAddress);
+        let verify_area = hit(&app, verify).unwrap();
+        let switch_area = hit(&app, switch).unwrap();
+        assert_eq!(switch_area.y, verify_area.y + u16::from(stacked));
+        assert!(switch_area.right() <= width);
+        if !stacked {
+            assert!(switch_area.x > verify_area.right());
+        }
+        app.busy = true;
+        render(&mut app, width, 20);
+        assert_eq!(hit(&app, switch), Some(switch_area));
+        assert!(hit(&app, verify).is_none());
+    }
+}
+
+#[test]
 fn settings_and_help_are_scoped_and_do_not_change_layout_on_open() {
     let mut app = app();
     app.connected = true;
@@ -901,13 +973,9 @@ fn seek_without_duration_shows_a_temporary_message() {
         )
         .unwrap();
     });
-    let session = termune::Candidate {
-        base,
-        relay: false,
-        label: "test",
-    }
-    .restore(&termune::client(3).unwrap(), "fixture-token".into())
-    .unwrap();
+    let session = termune::Candidate::new(base, false, "test")
+        .restore(&termune::client(3).unwrap(), "fixture-token".into())
+        .unwrap();
     server.join().unwrap();
 
     let mut app = app();
@@ -1223,6 +1291,61 @@ fn restored_session_enters_library_directly_and_escape_cancels_restore() {
     assert!(!app.restoring);
     assert!(!app.busy);
     assert!(render(&mut app, 100, 32).contains("音乐密码"));
+}
+
+#[test]
+fn switch_address_leaves_auto_login_and_access_code_verification() {
+    for verifying in [false, true] {
+        let mut app = app();
+        let address = "https://nas.example/";
+        app.config.auto_login = true;
+        app.config.nas_address = address.into();
+        app.config.username = "tester".into();
+        app.fields[0] = address.into();
+        app.focus = 2;
+        let (tx, commands) = mpsc::channel();
+        app.tx = tx;
+        let (replies, rx) = mpsc::channel();
+        app.rx = rx;
+        app.restore();
+        let Command::Restore { id, .. } = commands.try_recv().unwrap() else {
+            panic!("expected automatic login");
+        };
+        if verifying {
+            replies.send(Reply::AccessCode(id, None)).unwrap();
+            app.replies();
+            app.event(Event::Paste("access-fixture".into()));
+            key(&mut app, KeyCode::Enter);
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(Command::AccessCode { .. })
+            ));
+        }
+        let screen = render(&mut app, 36, 20);
+        assert!(screen.contains("[Esc 切换地址]"));
+        let button = app
+            .hits
+            .iter()
+            .find_map(|(rect, action)| matches!(action, Action::SwitchAddress).then_some(*rect))
+            .unwrap();
+        click_input(&mut app, button.x, button.y);
+        assert!(matches!(commands.try_recv(), Ok(Command::Logout)));
+        assert!(!app.busy && !app.restoring && app.access_prompt.is_none());
+        assert_eq!(app.focus, 0);
+        assert!(app.config.auto_login);
+        assert_eq!(app.config.nas_address, address);
+        assert_eq!(app.fields[0], address);
+        replies.send(Reply::AccessCode(id, None)).unwrap();
+        app.replies();
+        assert!(app.access_prompt.is_none());
+        let screen = render(&mut app, 36, 20);
+        assert!(screen.contains("FN ID 或 NAS 地址"));
+        assert!(
+            app.hits
+                .iter()
+                .any(|(_, action)| matches!(action, Action::Settings))
+        );
+    }
 }
 
 #[test]
